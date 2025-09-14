@@ -27,233 +27,160 @@ function simplifyRDP(points, eps = 2) {
   return [points[0], points[points.length - 1]];
 }
 
+/** 自動校正幾何形狀 */
 function snapShape(kind, pts) {
   if (kind === "line") {
     const p1 = pts[0], p2 = pts[pts.length - 1];
     const dx = p2.x - p1.x, dy = p2.y - p1.y;
-    if (Math.abs(dx) > Math.abs(dy))
-      return [{x:p1.x,y:p1.y},{x:p2.x,y:p1.y}];
-    else
-      return [{x:p1.x,y:p1.y},{x:p1.x,y:p2.y}];
+    return Math.abs(dx) > Math.abs(dy)
+      ? [{x:p1.x,y:p1.y},{x:p2.x,y:p1.y}]
+      : [{x:p1.x,y:p1.y},{x:p1.x,y:p2.y}];
   }
   if (kind === "circle") {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of pts) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    }
-    const cx = (minX+maxX)/2, cy = (minY+maxY)/2;
-    const r = Math.max(maxX-minX,maxY-minY)/2;
-    const out = [];
-    for (let i=0;i<32;i++){
-      const a = (i/32)*Math.PI*2;
-      out.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r});
-    }
-    return out;
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    for (const p of pts){ if(p.x<minX)minX=p.x; if(p.y<minY)minY=p.y; if(p.x>maxX)maxX=p.x; if(p.y>maxY)maxY=p.y; }
+    const cx=(minX+maxX)/2, cy=(minY+maxY)/2, r=Math.max(maxX-minX,maxY-minY)/2;
+    return Array.from({length:32},(_,i)=>({x:cx+Math.cos(i/32*Math.PI*2)*r,y:cy+Math.sin(i/32*Math.PI*2)*r}));
   }
   if (kind === "rect") {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of pts) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    }
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    for (const p of pts){ if(p.x<minX)minX=p.x; if(p.y<minY)minY=p.y; if(p.x>maxX)maxX=p.x; if(p.y>maxY)maxY=p.y; }
     return [
-      {x:minX,y:minY},
-      {x:maxX,y:minY},
-      {x:maxX,y:maxY},
-      {x:minX,y:maxY},
-      {x:minX,y:minY},
+      {x:minX,y:minY},{x:maxX,y:minY},{x:maxX,y:maxY},{x:minX,y:maxY},{x:minX,y:minY},
     ];
   }
   return pts;
 }
 
+/** 圖形辨識 */
 function recognizeStroke(pts) {
-  if (pts.length < 6) return null;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  let sumX = 0, sumY = 0;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-    sumX += p.x; sumY += p.y;
-  }
-  const bbox = { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
-  const center = { x: sumX / pts.length, y: sumY / pts.length };
+  if (pts.length < 6) return { kind:"free", pts };
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity,sumX=0,sumY=0;
+  for (const p of pts){ if(p.x<minX)minX=p.x; if(p.y<minY)minY=p.y; if(p.x>maxX)maxX=p.x; if(p.y>maxY)maxY=p.y; sumX+=p.x; sumY+=p.y; }
+  const bbox={x:minX,y:minY,w:Math.max(1,maxX-minX),h:Math.max(1,maxY-minY)};
+  const center={x:sumX/pts.length,y:sumY/pts.length};
+  const closed=Math.hypot(pts[0].x-pts[pts.length-1].x,pts[0].y-pts[pts.length-1].y)<16;
+  const aspect=bbox.w>bbox.h?bbox.w/bbox.h:bbox.h/bbox.w;
 
-  const dx = pts[0].x - pts[pts.length - 1].x;
-  const dy = pts[0].y - pts[pts.length - 1].y;
-  const closed = Math.hypot(dx, dy) < 16;
+  let rSum=0; for (const p of pts) rSum+=Math.hypot(p.x-center.x,p.y-center.y);
+  const rAvg=rSum/pts.length;
+  let varSum=0; for (const p of pts) varSum+=Math.pow(Math.hypot(p.x-center.x,p.y-center.y)-rAvg,2);
+  const circularity=Math.sqrt(varSum/pts.length)/(rAvg||1);
 
-  const aspect = bbox.w > bbox.h ? bbox.w / bbox.h : bbox.h / bbox.w;
-
-  let rSum = 0;
-  for (const p of pts) rSum += Math.hypot(p.x - center.x, p.y - center.y);
-  const rAvg = rSum / pts.length;
-  let varSum = 0;
-  for (const p of pts) {
-    const r = Math.hypot(p.x - center.x, p.y - center.y);
-    varSum += Math.pow(r - rAvg, 2);
-  }
-  const rStd = Math.sqrt(varSum / pts.length);
-  const circularity = rStd / (rAvg || 1);
-
-  if (!closed && aspect > 4) return { kind: "line", bbox, center, pts: snapShape("line", pts) };
-  if (closed && circularity < 0.18) return { kind: "circle", bbox, center, pts: snapShape("circle", pts) };
-  const simp = simplifyRDP(pts, 4);
-  if (closed && simp.length >= 4 && simp.length <= 8 && circularity > 0.18) {
-    return { kind: "rect", bbox, center, pts: snapShape("rect", pts) };
-  }
-  return null;
+  if (!closed && aspect>4) return { kind:"line", bbox, center, pts:snapShape("line",pts) };
+  if (closed && circularity<0.18) return { kind:"circle", bbox, center, pts:snapShape("circle",pts) };
+  const simp=simplifyRDP(pts,4);
+  if (closed && simp.length>=4 && simp.length<=8 && circularity>0.18)
+    return { kind:"rect", bbox, center, pts:snapShape("rect",pts) };
+  return { kind:"free", bbox, center, pts }; // ⬅️ 保留自由筆跡
 }
 
 export default function Sketch2D({
   enabled,
   onExit,
   onCommit,
-  mmPerPx = 1,
-  defaultBoxH = 10,
-  defaultCylH = 40,
-  defaultHole = false,
+  mmPerPx=1,
+  defaultBoxH=10,
+  defaultCylH=40,
+  defaultHole=false,
 }) {
-  const canvasRef = useRef(null);
-  const [dragging, setDragging] = useState(false);
-  const [pts, setPts] = useState([]);
-  const [shapes, setShapes] = useState([]);
-  const [asHole, setAsHole] = useState(defaultHole);
-  const [eraser, setEraser] = useState(false);
+  const canvasRef=useRef(null);
+  const [dragging,setDragging]=useState(false);
+  const [pts,setPts]=useState([]);
+  const [shapes,setShapes]=useState([]);
+  const [asHole,setAsHole]=useState(defaultHole);
+  const [eraser,setEraser]=useState(false);
 
-  useEffect(() => {
-    if (!enabled) return;
-    const cvs = canvasRef.current;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const rect = cvs.getBoundingClientRect();
-    cvs.width = Math.round(rect.width * dpr);
-    cvs.height = Math.round(rect.height * dpr);
-    cvs.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
-  }, [enabled]);
+  useEffect(()=>{ 
+    if(!enabled)return;
+    const cvs=canvasRef.current;
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    const rect=cvs.getBoundingClientRect();
+    cvs.width=Math.round(rect.width*dpr);
+    cvs.height=Math.round(rect.height*dpr);
+    cvs.getContext("2d").setTransform(dpr,0,0,dpr,0,0);
+  },[enabled]);
 
-  const draw = () => {
-    const cvs = canvasRef.current;
-    const ctx = cvs.getContext("2d");
-    const rect = cvs.getBoundingClientRect();
-    ctx.clearRect(0, 0, rect.width, rect.height);
-    ctx.fillStyle = "rgba(14,17,22,0.85)";
-    ctx.fillRect(0, 0, rect.width, rect.height);
-
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    const step = 50;
-    for (let x = (rect.width/2) % step; x < rect.width; x += step) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, rect.height); ctx.stroke();
-    }
-    for (let y = (rect.height/2) % step; y < rect.height; y += step) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(rect.width, y); ctx.stroke();
-    }
-    ctx.strokeStyle = "rgba(255,255,255,0.15)";
-    ctx.beginPath(); ctx.moveTo(rect.width/2, 0); ctx.lineTo(rect.width/2, rect.height); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, rect.height/2); ctx.lineTo(rect.width, rect.height/2); ctx.stroke();
-
-    const drawPath = (arr,color) => {
-      if (!arr?.length) return;
-      ctx.strokeStyle=color; ctx.lineWidth=2;
-      ctx.beginPath();
-      ctx.moveTo(arr[0].x, arr[0].y);
-      for (let i=1;i<arr.length;i++) ctx.lineTo(arr[i].x, arr[i].y);
-      ctx.stroke();
-    };
-
-    for (const s of shapes) drawPath(s.pts,"rgba(255,200,0,0.6)");
+  const draw=()=>{
+    const cvs=canvasRef.current, ctx=cvs.getContext("2d"), rect=cvs.getBoundingClientRect();
+    ctx.clearRect(0,0,rect.width,rect.height);
+    ctx.fillStyle="rgba(14,17,22,0.85)";
+    ctx.fillRect(0,0,rect.width,rect.height);
+    ctx.strokeStyle="rgba(255,255,255,0.06)"; ctx.lineWidth=1;
+    const step=50;
+    for(let x=(rect.width/2)%step;x<rect.width;x+=step){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,rect.height);ctx.stroke();}
+    for(let y=(rect.height/2)%step;y<rect.height;y+=step){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(rect.width,y);ctx.stroke();}
+    ctx.strokeStyle="rgba(255,255,255,0.15)";
+    ctx.beginPath();ctx.moveTo(rect.width/2,0);ctx.lineTo(rect.width/2,rect.height);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(0,rect.height/2);ctx.lineTo(rect.width,rect.height/2);ctx.stroke();
+    const drawPath=(arr,color)=>{if(!arr?.length)return;ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(arr[0].x,arr[0].y);for(let i=1;i<arr.length;i++)ctx.lineTo(arr[i].x,arr[i].y);ctx.stroke();};
+    for(const s of shapes) drawPath(s.pts,"rgba(255,200,0,0.6)");
     drawPath(pts,"rgba(173,216,230,0.9)");
   };
-  useEffect(draw, [pts, shapes, enabled]);
+  useEffect(draw,[pts,shapes,enabled]);
 
-  useEffect(() => {
-    if (!enabled) return;
-    const cvs = canvasRef.current;
-
-    const getPos = (e) => {
-      const r = cvs.getBoundingClientRect();
-      return {
-        x: (e.touches ? e.touches[0].clientX : e.clientX) - r.left,
-        y: (e.touches ? e.touches[0].clientY : e.clientY) - r.top,
-      };
+  useEffect(()=>{
+    if(!enabled)return;
+    const cvs=canvasRef.current;
+    const getPos=e=>{
+      const r=cvs.getBoundingClientRect();
+      return {x:(e.touches?e.touches[0].clientX:e.clientX)-r.left,y:(e.touches?e.touches[0].clientY:e.clientY)-r.top};
     };
-
-    const down = (e) => {
+    const down=e=>{
       e.preventDefault();
-      const p = getPos(e);
-      if (eraser) {
-        const hit = shapes.findIndex(s =>
-          s.pts.some(pt => Math.hypot(pt.x - p.x, pt.y - p.y) < 10)
-        );
-        if (hit !== -1) setShapes(arr => arr.filter((_, i) => i !== hit));
+      const p=getPos(e);
+      if(eraser){
+        const hit=shapes.findIndex(s=>s.pts.some(pt=>Math.hypot(pt.x-p.x,pt.y-p.y)<10));
+        if(hit!==-1)setShapes(arr=>arr.filter((_,i)=>i!==hit));
         return;
       }
       setDragging(true);
       setPts([p]);
     };
-    const move = (e) => {
-      if (!dragging || eraser) return;
-      e.preventDefault();
-      setPts((arr) => arr.concat(getPos(e)));
-    };
-    const up = (e) => {
-      if (!dragging || eraser) return;
+    const move=e=>{ if(!dragging||eraser)return; e.preventDefault(); setPts(arr=>arr.concat(getPos(e))); };
+    const up=e=>{
+      if(!dragging||eraser)return;
       e.preventDefault();
       setDragging(false);
-      setPts((arr) => {
-        const guess = recognizeStroke(arr);
-        if (guess) setShapes(s => [...s, guess]);
+      setPts(arr=>{
+        const guess=recognizeStroke(arr);
+        if(guess) setShapes(s=>[...s,guess]);
         return [];
       });
     };
+    cvs.addEventListener("pointerdown",down);
+    window.addEventListener("pointermove",move);
+    window.addEventListener("pointerup",up);
+    window.addEventListener("pointercancel",up);
+    return()=>{cvs.removeEventListener("pointerdown",down);window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);window.removeEventListener("pointercancel",up);};
+  },[enabled,dragging,eraser]);
 
-    cvs.addEventListener("pointerdown", down);
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
-    return () => {
-      cvs.removeEventListener("pointerdown", down);
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
-    };
-  }, [enabled, dragging, eraser]);
+  if(!enabled)return null;
 
-  if (!enabled) return null;
-
-  const pxToMM = (p) => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    const cx = rect.width / 2, cy = rect.height / 2;
-    return { x: (p.x - cx) * mmPerPx, z: (p.y - cy) * mmPerPx };
+  const pxToMM=p=>{
+    const rect=canvasRef.current.getBoundingClientRect();
+    const cx=rect.width/2, cy=rect.height/2;
+    return {x:(p.x-cx)*mmPerPx, z:(p.y-cy)*mmPerPx};
   };
 
-  const acceptShape = () => {
-    const dslList = shapes.map((s) => {
-      const { kind, bbox, center } = s;
-      const c = pxToMM(center);
-      if (kind === "rect") {
-        const w = Math.round(bbox.w * mmPerPx);
-        const d = Math.round(bbox.h * mmPerPx);
-        const h = Math.round(defaultBoxH);
+  const acceptShape=()=>{
+    const dslList=shapes.map(s=>{
+      const {kind,bbox,center}=s;
+      if(!center)return"";
+      const c=pxToMM(center);
+      if(kind==="rect"){
+        const w=Math.round(bbox.w*mmPerPx), d=Math.round(bbox.h*mmPerPx), h=Math.round(defaultBoxH);
         return `box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h/2)},${Math.round(c.z)});`;
       }
-      if (kind === "circle") {
-        const r = Math.max(bbox.w, bbox.h) * mmPerPx / 2;
-        if (asHole) return `hole dia=${Math.round(r*2)} at(${Math.round(c.x)},0,${Math.round(c.z)}) depth=thru;`;
+      if(kind==="circle"){
+        const r=Math.max(bbox.w,bbox.h)*mmPerPx/2;
+        if(asHole) return `hole dia=${Math.round(r*2)} at(${Math.round(c.x)},0,${Math.round(c.z)}) depth=thru;`;
         else return `cylinder r=${Math.round(r)} h=${defaultCylH} at(${Math.round(c.x)},${Math.round(defaultCylH/2)},${Math.round(c.z)}) axis=y;`;
       }
-      return "";
+      return ""; // free / line 不轉 3D
     }).filter(Boolean);
-    if (dslList.length) onCommit?.(dslList.join("\n"));
-    setShapes([]);
-    setPts([]);
+    if(dslList.length) onCommit?.(dslList.join("\n"));
+    setPts([]); // ✅ 不清空 shapes，畫布保留
   };
 
   return (
@@ -268,7 +195,7 @@ export default function Sketch2D({
           <input type="checkbox" checked={eraser} onChange={e=>setEraser(e.target.checked)}/>🧽 橡皮擦
         </label>
         <label style={{display:"flex",gap:6,alignItems:"center"}}>
-          <input type="checkbox" checked={asHole} onChange={(e)=>setAsHole(e.target.checked)}/>畫圓當作孔
+          <input type="checkbox" checked={asHole} onChange={e=>setAsHole(e.target.checked)}/>畫圓當作孔
         </label>
         <button onClick={()=>setShapes([])}>清除</button>
         <button onClick={acceptShape} disabled={!shapes.length}>✓ 送出</button>
