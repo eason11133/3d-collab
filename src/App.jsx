@@ -6,8 +6,6 @@ import {
   Grid,
   GizmoHelper,
   GizmoViewport,
-  Bounds,
-  useBounds,
 } from "@react-three/drei";
 import * as THREE from "three";
 import SceneFromParams from "./SceneFromParams";
@@ -38,21 +36,6 @@ cylinder r=10 h=50 at(0,0,5) axis=z;`,
 ];
 
 const SAMPLE = EXAMPLES[0].dsl;
-
-/* ---------- 穩定重置視角：雙幀 fit，且強制重掛 Bounds ---------- */
-function AutoFit({ deps }) {
-  const api = useBounds();
-  useEffect(() => {
-    // 連續兩幀 fit，避免幾何剛掛上去時 AABB 還沒穩定
-    const id1 = requestAnimationFrame(() => api.refresh().fit());
-    const id2 = requestAnimationFrame(() => api.refresh().fit());
-    return () => {
-      cancelAnimationFrame(id1);
-      cancelAnimationFrame(id2);
-    };
-  }, [api, deps]);
-  return null;
-}
 
 /* ---------- 截圖（等一幀後 toBlob） ---------- */
 function ScreenshotTaker({ request, onDone }) {
@@ -112,7 +95,6 @@ function prepareExportRoot(root) {
       g = g.clone();
       g.applyMatrix4(obj.matrixWorld);
 
-      // 清空 transform，避免重複套用
       obj.matrixWorld.identity();
       obj.matrix.identity();
       obj.position.set(0, 0, 0);
@@ -135,25 +117,10 @@ function prepareExportRoot(root) {
   return clone;
 }
 
-/* ---------- 分享連結編解碼 ---------- */
-function encodeShare(payload) {
-  const txt = JSON.stringify(payload);
-  return btoa(unescape(encodeURIComponent(txt)));
-}
-function decodeShare(s) {
-  try {
-    const txt = decodeURIComponent(escape(atob(s)));
-    return JSON.parse(txt);
-  } catch {
-    return null;
-  }
-}
-
 /* ---------- 兼容不同 three 版本的 GLTFExporter.parse 簽名 ---------- */
 function parseGLTF(exporter, input, onDone, options) {
   const len = exporter.parse.length;
   if (len >= 4) {
-    // (input, onDone, onError, options)
     exporter.parse(
       input,
       onDone,
@@ -164,9 +131,59 @@ function parseGLTF(exporter, input, onDone, options) {
       options
     );
   } else {
-    // (input, onDone, options)
     exporter.parse(input, onDone, options);
   }
+}
+
+/* ---------- 精準重置視角：用包圍球計算相機距離與目標 ---------- */
+function FitCamera({ targetRef, resetKey, controlsRef }) {
+  const { camera, size } = useThree();
+  useEffect(() => {
+    const root = targetRef.current;
+    if (!root) return;
+
+    const run = () => {
+      root.updateWorldMatrix(true, true);
+
+      const box = new THREE.Box3().setFromObject(root);
+      if (!isFinite(box.min.x) || box.isEmpty()) return;
+
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      const center = sphere.center.clone();
+      const radius = Math.max(sphere.radius, 1e-3);
+
+      const fov = (camera.fov * Math.PI) / 180;
+      const fitHeightDistance = radius / Math.sin(fov / 2);
+      const fitWidthDistance = fitHeightDistance / camera.aspect;
+      const distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.2;
+
+      // 保留現有視角方向，往外退到合適距離
+      const currentTarget =
+        controlsRef.current?.target || new THREE.Vector3(0, 0, 0);
+      const dir = camera.position.clone().sub(currentTarget).normalize();
+      if (dir.lengthSq() === 0) dir.set(1, 1, 1).normalize();
+
+      camera.position.copy(center.clone().add(dir.multiplyScalar(distance)));
+      camera.near = Math.max(distance / 100, 0.01);
+      camera.far = distance * 100;
+      camera.updateProjectionMatrix();
+
+      if (controlsRef.current) {
+        controlsRef.current.target.copy(center);
+        controlsRef.current.update();
+      }
+    };
+
+    // 兩幀確保幾何穩定後再算
+    const id1 = requestAnimationFrame(run);
+    const id2 = requestAnimationFrame(run);
+    return () => {
+      cancelAnimationFrame(id1);
+      cancelAnimationFrame(id2);
+    };
+  }, [targetRef, resetKey, size.width, size.height, controlsRef, camera]);
+
+  return null;
 }
 
 export default function App() {
@@ -186,19 +203,25 @@ export default function App() {
 
   const [resetAsk, setResetAsk] = useState(0);
   const [shotAsk, setShotAsk] = useState(0);
-  const exportRootRef = useRef(); // 只包「可匯出」的實體
 
-  // 啟動時讀取分享連結 (?s=...)
+  // 匯出／置中都對準這個「幾何根節點」
+  const exportRootRef = useRef(); // 由 SceneFromParams 掛載其中的可匯出幾何
+  const controlsRef = useRef();
+
+  // 啟動時讀分享參數 (?s=...)
   useEffect(() => {
     const u = new URL(window.location.href);
     const s = u.searchParams.get("s");
     if (s) {
-      const p = decodeShare(s);
-      if (p?.dsl) {
-        setSrc(p.dsl);
-        setCmds(parseDSL(p.dsl));
-      }
-      if (Array.isArray(p?.pins)) setPins(p.pins);
+      try {
+        const txt = decodeURIComponent(escape(atob(s)));
+        const p = JSON.parse(txt);
+        if (p?.dsl) {
+          setSrc(p.dsl);
+          setCmds(parseDSL(p.dsl));
+        }
+        if (Array.isArray(p?.pins)) setPins(p.pins);
+      } catch {}
       u.searchParams.delete("s");
       window.history.replaceState({}, "", u.pathname);
     }
@@ -217,7 +240,7 @@ export default function App() {
     [cmds, resetAsk]
   );
 
-  /* ---------- 匯出 GLB（含 JSON 後備與魔術字檢查） ---------- */
+  /* ---------- 匯出 GLB（有 JSON 後備與 magic 檢查） ---------- */
   function exportGLB() {
     const root = exportRootRef.current;
     if (!root) return alert("沒有可匯出的幾何，請先按「生成 3D」。");
@@ -231,17 +254,12 @@ export default function App() {
       embedImages: true,
     };
 
-    parseGLTF(exporter, safe, async (res) => {
-      // 盡量取得 ArrayBuffer
+    parseGLTF(exporter, safe, (res) => {
       let ab = null;
-      if (res instanceof ArrayBuffer) {
-        ab = res;
-      } else if (res && res.buffer instanceof ArrayBuffer) {
-        ab = res.buffer; // TypedArray
-      }
+      if (res instanceof ArrayBuffer) ab = res;
+      else if (res && res.buffer instanceof ArrayBuffer) ab = res.buffer;
 
       if (!ab) {
-        // 不是二進位：退回 JSON glTF
         console.warn("GLB 未生成，改存 JSON glTF。");
         const exporter2 = new GLTFExporter();
         parseGLTF(
@@ -258,7 +276,6 @@ export default function App() {
         return;
       }
 
-      // 檢查 magic "glTF"
       try {
         const u8 = new Uint8Array(ab, 0, 4);
         const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
@@ -301,7 +318,7 @@ export default function App() {
   /* ---------- 分享連結 ---------- */
   async function shareLink() {
     const payload = { dsl: src, pins };
-    const s = encodeShare(payload);
+    const s = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
     const url = `${location.origin}${location.pathname}?s=${s}`;
     try {
       await navigator.clipboard.writeText(url);
@@ -461,18 +478,23 @@ export default function App() {
         <directionalLight position={[50, 80, 50]} intensity={0.85} />
         <Grid args={[500, 50]} />
 
-        {/* 這裡 key={deps} 讓 Bounds 在重置時重新掛載，保證 fit 生效 */}
-        <Bounds key={deps} clip observe margin={1}>
+        {/* 幾何根節點：SceneFromParams 會把可匯出幾何掛在這裡 */}
+        <group ref={exportRootRef}>
           <SceneFromParams commands={cmds} exportRef={exportRootRef} />
-          <PinLayer pins={pins} setPins={setPins} />
-          <AutoFit deps={deps} />
-          <ScreenshotTaker request={shotAsk} onDone={() => {}} />
-        </Bounds>
+        </group>
 
-        <OrbitControls makeDefault />
+        {/* UI 層（不進匯出/置中計算） */}
+        <PinLayer pins={pins} setPins={setPins} />
+
+        {/* 精準重置視角 */}
+        <FitCamera targetRef={exportRootRef} resetKey={deps} controlsRef={controlsRef} />
+
+        <OrbitControls ref={controlsRef} makeDefault />
         <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
           <GizmoViewport />
         </GizmoHelper>
+
+        <ScreenshotTaker request={shotAsk} onDone={() => {}} />
       </Canvas>
     </div>
   );
