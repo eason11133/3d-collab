@@ -12,26 +12,20 @@ import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 
 const EXAMPLES = [
-  {
-    label: "板子 + 圓柱 + 貫穿孔",
+  { label: "板子 + 圓柱 + 貫穿孔",
     dsl: `box w=120 h=30 d=80;
 cylinder r=12 h=40 at(20,15,0) axis=y;
-hole dia=10 at(0,0,0) depth=thru;`,
-  },
-  {
-    label: "長方體 + 兩個孔",
+hole dia=10 at(0,0,0) depth=thru;`, },
+  { label: "長方體 + 兩個孔",
     dsl: `box w=100 h=20 d=60;
 hole dia=8 at(-20,10,0);
-hole dia=8 at(20,10,0);`,
-  },
-  {
-    label: "小平台 + 直立圓柱",
+hole dia=8 at(20,10,0);`, },
+  { label: "小平台 + 直立圓柱",
     dsl: `box w=80 h=10 d=80;
-cylinder r=10 h=50 at(0,0,5) axis=z;`,
-  },
+cylinder r=10 h=50 at(0,0,5) axis=z;`, },
 ];
 
-// 預設不要任何模型
+// ✅ 預設空場景
 const SAMPLE = "";
 
 /* ---------- 截圖 ---------- */
@@ -42,26 +36,18 @@ function ScreenshotTaker({ request, onDone }) {
     const raf = requestAnimationFrame(() => {
       try {
         gl.render(scene, camera);
-        gl.domElement.toBlob(
-          (blob) => {
-            if (!blob) return onDone?.();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `snapshot-${Date.now()}.png`;
-            a.click();
-            setTimeout(() => URL.revokeObjectURL(url), 2000);
-            onDone?.();
-          },
-          "image/png",
-          1
-        );
+        gl.domElement.toBlob((blob) => {
+          if (!blob) return onDone?.();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = `snapshot-${Date.now()}.png`; a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 2000);
+          onDone?.();
+        }, "image/png", 1);
       } catch {
         const url = gl.domElement.toDataURL("image/png");
         const a = document.createElement("a");
-        a.href = url;
-        a.download = `snapshot-${Date.now()}.png`;
-        a.click();
+        a.href = url; a.download = `snapshot-${Date.now()}.png`; a.click();
         onDone?.();
       }
     });
@@ -74,9 +60,7 @@ function ScreenshotTaker({ request, onDone }) {
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
+  a.href = url; a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
@@ -177,8 +161,7 @@ function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
       const record = !!(e.detail && e.detail.record);
       const root = exportRootRef.current || scene.getObjectByName("EXPORT_ROOT");
       fitToExportRoot({
-        root,
-        camera,
+        root, camera,
         controls: controlsRef.current,
         recordPoseRef: initialPoseRef,
         record,
@@ -189,8 +172,8 @@ function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
       if (!pose) return;
       camera.position.copy(pose.pos);
       camera.near = pose.near ?? camera.near;
-      camera.far = pose.far ?? camera.far;
-      camera.fov = pose.fov ?? camera.fov;
+      camera.far  = pose.far  ?? camera.far;
+      camera.fov  = pose.fov  ?? camera.fov;
       camera.updateProjectionMatrix();
       if (controlsRef.current) {
         controlsRef.current.target.copy(pose.target);
@@ -208,31 +191,33 @@ function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
 }
 
 export default function App() {
-  // ✅ 初始就是空白場景（不讀 localStorage）
-  const [src, setSrc] = useState(SAMPLE); // ""
-  const [cmds, setCmds] = useState([]);   // []
-  const [nl, setNL] = useState("");
+  // ✅ 初始空白場景
+  const [src, setSrc]   = useState(SAMPLE); // ""
+  const [cmds, setCmds] = useState([]);     // []
+  const [nl, setNL]     = useState("");
 
   const [pins, setPins] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("pins") || "[]");
-    } catch {
-      return [];
-    }
+    try { return JSON.parse(localStorage.getItem("pins") || "[]"); }
+    catch { return []; }
   });
   const [shotAsk, setShotAsk] = useState(0);
 
   // 繪圖 UI 狀態
   const [drawEnabled, setDrawEnabled] = useState(false);
-  const [drawShape, setDrawShape] = useState("box"); // 'box' | 'cyl'
-  const [drawHeight, setDrawHeight] = useState(20);
+  const [drawShape, setDrawShape]     = useState("box"); // 'box' | 'cyl'
+  const [drawHeight, setDrawHeight]   = useState(20);
 
-  // 幾何根 / 控制器 / 「生成當下相機姿態」
-  const exportRootRef = useRef();
-  const controlsRef = useRef();
-  const initialPoseRef = useRef(null);
+  // 幾何根 / 控制器 / 初始相機姿態
+  const exportRootRef   = useRef();
+  const controlsRef     = useRef();
+  const initialPoseRef  = useRef(null);
 
-  // 分享連結參數（若有 ?s=... 仍可載入）
+  // 開啟/關閉繪圖模式時，切換 OrbitControls
+  useEffect(() => {
+    if (controlsRef.current) controlsRef.current.enabled = !drawEnabled;
+  }, [drawEnabled]);
+
+  // 讀分享參數
   useEffect(() => {
     const u = new URL(window.location.href);
     const s = u.searchParams.get("s");
@@ -261,18 +246,12 @@ export default function App() {
   const round = (n) => (typeof n === "number" ? Math.round(n * 100) / 100 : n);
   const cmdToDSL = (c) => {
     if (c.type === "box")
-      return `box w=${round(c.w)} h=${round(c.h)} d=${round(c.d)} at(${round(c.pos[0])},${round(
-        c.pos[1]
-      )},${round(c.pos[2])})`;
+      return `box w=${round(c.w)} h=${round(c.h)} d=${round(c.d)} at(${round(c.pos[0])},${round(c.pos[1])},${round(c.pos[2])})`;
     if (c.type === "cyl")
-      return `cylinder r=${round(c.r)} h=${round(c.h)} at(${round(c.pos[0])},${round(
-        c.pos[1]
-      )},${round(c.pos[2])}) axis=${c.axis || "y"}`;
+      return `cylinder r=${round(c.r)} h=${round(c.h)} at(${round(c.pos[0])},${round(c.pos[1])},${round(c.pos[2])}) axis=${c.axis || "y"}`;
     if (c.type === "hole") {
       const depth = c.depth === "thru" ? "" : ` depth=${round(c.depth)}`;
-      return `hole dia=${round(c.dia)} at(${round(c.pos[0])},${round(c.pos[1])},${round(
-        c.pos[2]
-      )})${depth}`;
+      return `hole dia=${round(c.dia)} at(${round(c.pos[0])},${round(c.pos[1])},${round(c.pos[2])})${depth}`;
     }
     return "";
   };
@@ -281,10 +260,7 @@ export default function App() {
   const handleGenerate = (dslText) => {
     const text = dslText ?? src;
     setSrc(text);
-    if (!text.trim()) {
-      setCmds([]); // 空字串 -> 清空模型
-      return;      // 不自動置中相機
-    }
+    if (!text.trim()) { setCmds([]); return; }
     setCmds(parseDSL(text));
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
@@ -308,40 +284,30 @@ export default function App() {
     const safe = prepareExportRoot(root);
     const exporter = new GLTFExporter();
     const opts = { binary: true, onlyVisible: true, truncateDrawRange: true, embedImages: true };
-    parseGLTF(
-      exporter,
-      safe,
-      (res) => {
-        let ab = null;
-        if (res instanceof ArrayBuffer) ab = res;
-        else if (res && res.buffer instanceof ArrayBuffer) ab = res.buffer;
+    parseGLTF(exporter, safe, (res) => {
+      let ab = null;
+      if (res instanceof ArrayBuffer) ab = res;
+      else if (res && res.buffer instanceof ArrayBuffer) ab = res.buffer;
 
-        if (ab) {
-          try {
-            const u8 = new Uint8Array(ab, 0, 4);
-            const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
-            if (magic === "glTF") {
-              const blob = new Blob([ab], { type: "model/gltf-binary" });
-              downloadBlob(blob, `model-${Date.now()}.glb`);
-              return;
-            }
-          } catch {}
-        }
-        // 退回 JSON glTF
-        const exporter2 = new GLTFExporter();
-        parseGLTF(
-          exporter2,
-          safe,
-          (json) => {
-            const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
-            downloadBlob(blob, `model-${Date.now()}.gltf`);
-          },
-          { binary: false }
-        );
-      },
-      opts
-    );
+      if (ab) {
+        try {
+          const u8 = new Uint8Array(ab, 0, 4);
+          const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+          if (magic === "glTF") {
+            const blob = new Blob([ab], { type: "model/gltf-binary" });
+            downloadBlob(blob, `model-${Date.now()}.glb`);
+            return;
+          }
+        } catch {}
+      }
+      const exporter2 = new GLTFExporter();
+      parseGLTF(exporter2, safe, (json) => {
+        const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
+        downloadBlob(blob, `model-${Date.now()}.gltf`);
+      }, { binary: false });
+    }, opts);
   }
+
   function exportSTL() {
     const root = exportRootRef.current;
     if (!root) return alert("沒有可匯出的幾何，請先按「生成 3D」。");
@@ -364,7 +330,7 @@ export default function App() {
     }
   }
 
-  /* ---------- 繪圖提交：把幾何插入 cmds + 同步 DSL，並貼齊視角（不覆寫初始姿態） ---------- */
+  /* ---------- 繪圖提交 ---------- */
   const handleDrawCreate = (cmd) => {
     setCmds((prev) => [...prev, cmd]);
     setSrc((prev) => {
@@ -379,15 +345,7 @@ export default function App() {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", height: "100vh" }}>
       {/* 左側面板 */}
-      <div
-        style={{
-          padding: 12,
-          borderRight: "1px solid #222",
-          background: "#0e1116",
-          color: "#ddd",
-          overflow: "auto",
-        }}
-      >
+      <div style={{ padding: 12, borderRight: "1px solid #222", background: "#0e1116", color: "#ddd", overflow: "auto" }}>
         <h3 style={{ margin: "0 0 8px" }}>用中文描述你的 3D</h3>
         <textarea
           value={nl}
@@ -396,28 +354,16 @@ export default function App() {
           style={{ width: "100%", height: 90, background: "#0b0e13", color: "#ddd", marginBottom: 8 }}
         />
         <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-          <button
-            onClick={() => {
-              const dsl = parseNL(nl);
-              if (!dsl) return alert("抱歉，這段中文我看不懂，再換個說法試試 🙏");
-              handleGenerate(dsl);
-            }}
-          >
+          <button onClick={() => { const dsl = parseNL(nl); if (!dsl) return alert("抱歉，這段中文我看不懂，再換個說法試試 🙏"); handleGenerate(dsl); }}>
             中文 → 生成
           </button>
-
           <select
-            onChange={(e) => {
-              const found = EXAMPLES.find((x) => x.dsl === e.target.value);
-              if (found) handleGenerate(found.dsl);
-            }}
+            onChange={(e) => { const found = EXAMPLES.find((x) => x.dsl === e.target.value); if (found) handleGenerate(found.dsl); }}
             defaultValue=""
             style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }}
           >
             <option value="" disabled>載入範例…</option>
-            {EXAMPLES.map((ex) => (
-              <option key={ex.label} value={ex.dsl}>{ex.label}</option>
-            ))}
+            {EXAMPLES.map((ex) => (<option key={ex.label} value={ex.dsl}>{ex.label}</option>))}
           </select>
         </div>
 
@@ -427,21 +373,12 @@ export default function App() {
           <label>啟用</label>
           <input type="checkbox" checked={drawEnabled} onChange={(e) => setDrawEnabled(e.target.checked)} />
           <label>形狀</label>
-          <select
-            value={drawShape}
-            onChange={(e) => setDrawShape(e.target.value)}
-            style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }}
-          >
+          <select value={drawShape} onChange={(e) => setDrawShape(e.target.value)} style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }}>
             <option value="box">方塊（在地面上拖出寬/深）</option>
             <option value="cyl">圓柱（拖出半徑）</option>
           </select>
           <label>高度 (mm)</label>
-          <input
-            type="number"
-            value={drawHeight}
-            onChange={(e) => setDrawHeight(Math.max(1, Number(e.target.value) || 1))}
-            style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }}
-          />
+          <input type="number" value={drawHeight} onChange={(e) => setDrawHeight(Math.max(1, Number(e.target.value) || 1))} style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }} />
         </div>
 
         <h3 style={{ margin: "12px 0 8px" }}>DSL（輸入後按「生成 3D」）</h3>
@@ -455,14 +392,7 @@ export default function App() {
           <button onClick={() => handleGenerate()}>生成 3D</button>
           <button onClick={handleResetView}>重製視角</button>
           <button
-            onClick={() => {
-              // 新專案：清空一切
-              setSrc("");
-              setCmds([]);
-              setPins([]);
-              localStorage.removeItem("dsl");
-              localStorage.removeItem("pins");
-            }}
+            onClick={() => { setSrc(""); setCmds([]); setPins([]); localStorage.removeItem("dsl"); localStorage.removeItem("pins"); }}
           >
             新專案（清空）
           </button>
@@ -479,9 +409,7 @@ export default function App() {
             <input
               value={p.note}
               placeholder={`備註（${p.pos.map((n) => n.toFixed(1)).join(", ")})`}
-              onChange={(e) =>
-                setPins((arr) => arr.map((x) => (x.id === p.id ? { ...x, note: e.target.value } : x)))
-              }
+              onChange={(e) => setPins((arr) => arr.map((x) => (x.id === p.id ? { ...x, note: e.target.value } : x)))}
               style={{ background: "#0b0e13", color: "#ddd", border: "1px solid #333", padding: "6px 8px", borderRadius: 6 }}
             />
             <button onClick={() => setPins((arr) => arr.filter((x) => x.id !== p.id))}>刪除</button>
@@ -490,35 +418,24 @@ export default function App() {
       </div>
 
       {/* 右側 3D 畫布 */}
-      <Canvas
-        camera={{ position: [150, 120, 150], fov: 45 }}
-        style={{ background: "#0e1116" }}
-        gl={{ preserveDrawingBuffer: true, antialias: true }}
-        dpr={[1, 2]}
-      >
+      <Canvas camera={{ position: [150, 120, 150], fov: 45 }} style={{ background: "#0e1116" }} gl={{ preserveDrawingBuffer: true, antialias: true }} dpr={[1, 2]}>
         <color attach="background" args={["#0e1116"]} />
         <ambientLight intensity={0.6} />
         <directionalLight position={[50, 80, 50]} intensity={0.85} />
         <Grid args={[500, 50]} />
 
-        {/* 幾何 */}
         <SceneFromParams commands={cmds} exportRef={exportRootRef} />
 
-        {/* 繪圖工具（在 y=0 拖曳） */}
+        {/* ✅ 傳入 controlsRef，拖曳時會自動暫停 OrbitControls */}
         <DrawTool
           enabled={drawEnabled}
           shape={drawShape}
           height={drawHeight}
           onCreate={handleDrawCreate}
-        />
-
-        {/* 相機控制輔助 */}
-        <FitOnceHelper
-          exportRootRef={exportRootRef}
           controlsRef={controlsRef}
-          initialPoseRef={initialPoseRef}
         />
 
+        <FitOnceHelper exportRootRef={exportRootRef} controlsRef={controlsRef} initialPoseRef={initialPoseRef} />
         <PinLayer pins={pins} setPins={setPins} />
 
         <OrbitControls ref={controlsRef} makeDefault />
