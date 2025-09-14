@@ -1,5 +1,6 @@
 // src/nl.js
-// 中文自然語句 → 我們的 DSL
+// 中文 → DSL 解析器（支援中文數字、單位、常見口語、多點位 / 中心點等）
+// 匯出 parseNL 與 looksLikeDSL 供 App.jsx 使用
 
 const ZH_DIGIT = { "零":0,"〇":0,"一":1,"二":2,"兩":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9 };
 
@@ -25,7 +26,7 @@ function parseNumber(token) {
   if (token == null) return null;
   token = String(token).trim();
 
-  // 拿數字或中文數字
+  // 抓阿拉伯數字或中文數字
   let val = null;
   const m = token.match(/[-+]?\d+(?:\.\d+)?/);
   if (m) val = parseFloat(m[0]);
@@ -35,9 +36,8 @@ function parseNumber(token) {
   }
   if (val == null) return null;
 
-  // 單位換算：cm/公分→mm；mm/毫米/公厘→原值
+  // 單位換算：cm/公分→mm；mm/毫米/公厘→原值（其他視為 mm）
   if (/(?:cm|公分)/i.test(token)) val *= 10;
-  // 其他視為 mm
   return val;
 }
 
@@ -53,7 +53,7 @@ function pickAxis(text) {
 }
 
 function parseVec3All(text) {
-  // 抓 (x,y,z) 列表：在(10,0,0)、(30,0,0) … 或英數逗號混用
+  // 抓 (x,y,z) 列表：在(10,0,0)、(30,0,0) …
   if (!text) return [];
   const out = [];
   const re = /\(\s*([-+]?\d+(?:\.\d+)?)\s*[,，\s]\s*([-+]?\d+(?:\.\d+)?)\s*[,，\s]\s*([-+]?\d+(?:\.\d+)?)\s*\)/g;
@@ -76,11 +76,12 @@ function splitSentences(input) {
   return String(input || "")
     .replace(/[；;、]+/g, ";")
     .replace(/[。\.]+/g, ";")
-    .split(/[\n;]+/)
+    .split(/[\n;]+/g)
     .map(s => s.trim())
     .filter(Boolean);
 }
 
+// ===== 主解析：把自然語句轉成 DSL 多行 =====
 export function naturalToDSL(input) {
   const lines = [];
   if (!input) return "";
@@ -100,10 +101,10 @@ export function naturalToDSL(input) {
     const atOrEmpty = atStrs.length ? atStrs : [""]; // 至少一筆，便於展開
 
     // === BOX ===
-    if (/(底座|基座|盒子|方塊|長方體)/.test(s)) {
+    if (/(底座|基座|盒子|方塊|長方體|板子)/.test(s)) {
       let w, h, d;
 
-      // 1) 80x20x50 / 80×20×50 / 80 * 20 * 50
+      // 1) 80x20x50 / 80×20×50 / 80 * 20 * 50（可含單位）
       const mDim = s.match(
         /(\d+(?:\.\d+)?(?:\s*(?:mm|公分|cm)?)?)\s*[x×*]\s*(\d+(?:\.\d+)?(?:\s*(?:mm|公分|cm)?)?)\s*[x×*]\s*(\d+(?:\.\d+)?(?:\s*(?:mm|公分|cm)?)?)/i
       );
@@ -113,9 +114,9 @@ export function naturalToDSL(input) {
         d = parseNumber(mDim[3]);
       } else {
         // 2) 寬/高/深/厚 關鍵字
-        const mW = s.match(/(?:寬|長|寬度|長度)\s*=?\s*([-\d\.]+(?:\s*(?:mm|公分|cm))?)/);
-        const mH = s.match(/(?:高|厚|高度|厚度)\s*=?\s*([-\d\.]+(?:\s*(?:mm|公分|cm))?)/);
-        const mD = s.match(/(?:深|深度)\s*=?\s*([-\d\.]+(?:\s*(?:mm|公分|cm))?)/);
+        const mW = s.match(/(?:寬|長|寬度|長度)\s*=?\s*([-\w\.]+(?:\s*(?:mm|公分|cm))?)/);
+        const mH = s.match(/(?:高|厚|高度|厚度)\s*=?\s*([-\w\.]+(?:\s*(?:mm|公分|cm))?)/);
+        const mD = s.match(/(?:深|深度)\s*=?\s*([-\w\.]+(?:\s*(?:mm|公分|cm))?)/);
         w = mW ? parseNumber(mW[1]) : undefined;
         h = mH ? parseNumber(mH[1]) : undefined;
         d = mD ? parseNumber(mD[1]) : undefined;
@@ -124,7 +125,6 @@ export function naturalToDSL(input) {
       if (h == null) h = 20;
       if (d == null) d = 50;
 
-      // 位置展開（若沒指定→不加 at）
       for (const at of atOrEmpty) lines.push(`box w=${w} h=${h} d=${d}${at}`);
       continue;
     }
@@ -185,12 +185,18 @@ export function naturalToDSL(input) {
       continue;
     }
 
-    // 其他句型：忽略（可再擴充）
+    // 其他句型：暫忽略（可再擴充）
   }
 
   return lines.join(";\n");
 }
 
+// 供外部快速判斷輸入是不是 DSL
 export function looksLikeDSL(s) {
   return looksLikeDSLInput(String(s || ""));
+}
+
+// 為了與 App.jsx 相容，提供 parseNL 名稱（實際呼叫 naturalToDSL）
+export function parseNL(text) {
+  return naturalToDSL(text);
 }
