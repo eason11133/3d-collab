@@ -228,6 +228,34 @@ export default function Sketch2D({
 
   if (!enabled) return null;
 
+  const pxToMM = (p) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const cx = rect.width / 2, cy = rect.height / 2;
+    return { x: (p.x - cx) * mmPerPx, z: (p.y - cy) * mmPerPx };
+  };
+
+  const acceptShape = () => {
+    const dslList = shapes.map((s) => {
+      const { kind, bbox, center } = s;
+      const c = pxToMM(center);
+      if (kind === "rect") {
+        const w = Math.round(bbox.w * mmPerPx);
+        const d = Math.round(bbox.h * mmPerPx);
+        const h = Math.round(defaultBoxH);
+        return `box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h/2)},${Math.round(c.z)});`;
+      }
+      if (kind === "circle") {
+        const r = Math.max(bbox.w, bbox.h) * mmPerPx / 2;
+        if (asHole) return `hole dia=${Math.round(r*2)} at(${Math.round(c.x)},0,${Math.round(c.z)}) depth=thru;`;
+        else return `cylinder r=${Math.round(r)} h=${defaultCylH} at(${Math.round(c.x)},${Math.round(defaultCylH/2)},${Math.round(c.z)}) axis=y;`;
+      }
+      return "";
+    }).filter(Boolean);
+    if (dslList.length) onCommit?.(dslList.join("\n"));
+    setShapes([]);
+    setPts([]);
+  };
+
   return (
     <div style={{position:"absolute",inset:0,zIndex:5}}>
       <canvas ref={canvasRef} style={{width:"100%",height:"100%",cursor:"crosshair",touchAction:"none"}}/>
@@ -243,6 +271,7 @@ export default function Sketch2D({
           <input type="checkbox" checked={asHole} onChange={(e)=>setAsHole(e.target.checked)}/>畫圓當作孔
         </label>
         <button onClick={()=>setShapes([])}>清除</button>
+        <button onClick={acceptShape} disabled={!shapes.length}>✓ 送出</button>
         <button onClick={onExit}>關閉</button>
       </div>
     </div>
