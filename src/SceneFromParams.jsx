@@ -10,7 +10,7 @@ function mkBox({ w, h, d, pos }) {
       transparent: true,
       opacity: 0.55,
       depthWrite: false,
-      side: THREE.DoubleSide
+      side: THREE.DoubleSide,
     })
   );
   mesh.position.set(...pos);
@@ -45,21 +45,20 @@ function mkHoleCylinder({ dia, pos, depth, baseH }) {
 }
 
 export default function SceneFromParams({ commands = [], exportRef }) {
-  // 1) 找第一個 add 的 box 當底座
-  const baseCmd = commands.find(c => c.type === "box" && c.op !== "sub");
+  // 找第一個 add 的 box 當底座
+  const baseCmd = commands.find((c) => c.type === "box" && c.op !== "sub");
 
-  // 沒底座就畫 add 幾何（無 CSG）
+  // 沒底座就只畫 add 幾何（無 CSG）
   if (!baseCmd) {
     return (
       <>
-        <group ref={exportRef}>
+        <group ref={exportRef} name="EXPORT_ROOT" userData={{ exportable: true }}>
           {commands.map((c, i) => {
             if (c.type === "box" && c.op !== "sub") return <primitive key={i} object={mkBox(c)} />;
             if (c.type === "cyl" && c.op !== "sub") return <primitive key={i} object={mkCyl(c)} />;
             return null;
           })}
         </group>
-        {/* 標記（不匯出） */}
         {commands.map((c, i) =>
           c.type === "hole" ? (
             <mesh key={"mark-" + i} position={c.pos}>
@@ -72,7 +71,7 @@ export default function SceneFromParams({ commands = [], exportRef }) {
     );
   }
 
-  // 2) CSG 管線：底座 -> subtract -> union
+  // CSG：底座 -> subtract -> union
   const baseMesh = mkBox(baseCmd);
   let csg = CSG.fromMesh(baseMesh);
 
@@ -99,10 +98,10 @@ export default function SceneFromParams({ commands = [], exportRef }) {
   const result = CSG.toMesh(csg, baseMesh.matrix, baseMesh.material.clone());
   result.castShadow = result.receiveShadow = true;
 
-  // 3) 回傳：exportRef 只包可匯出的實體；標記放外面
+  // 匯出根只包可匯出的實體；孔位紅球是視覺標記（不進匯出）
   return (
     <>
-      <group ref={exportRef}>
+      <group ref={exportRef} name="EXPORT_ROOT" userData={{ exportable: true }}>
         <primitive object={result} />
       </group>
       {commands.map((c, i) =>
