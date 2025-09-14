@@ -1,124 +1,216 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { useThree } from "@react-three/fiber";
 
+/**
+ * DrawTool
+ * - enabled: 是否啟用
+ * - shape: 'box' | 'cyl' | 'hole'
+ * - op: 'add' | 'sub'   （hole 不用）
+ * - height: 物體高度（mm）
+ * - holeDia: 孔徑（mm）
+ * - snapStep: 吸附間距（mm；0/1 = 不吸附）
+ * - onCreate(cmd): 回傳一筆 DSL 指令物件
+ */
 export default function DrawTool({
-  enabled,
-  shape = "box",      // 'box' | 'cyl'
+  enabled = false,
+  shape = "box",
+  op = "add",
   height = 20,
+  holeDia = 8,
+  snapStep = 5,
   onCreate,
-  controlsRef,        // 可選：用來暫停 OrbitControls
 }) {
-  useThree(); // 只需接 R3F 事件系統
-  const overlayRef = useRef();
-  const dragging = useRef(false);
-  const start = useRef(new THREE.Vector3());
-  const curr = useRef(new THREE.Vector3());
-  const [tick, setTick] = useState(0);
+  const { gl, camera, scene, size } = useThree();
+  const draggingRef = useRef(false);
+  const startRef = useRef(new THREE.Vector3());
+  const previewRef = useRef(null);
+  const raycaster = useRef(new THREE.Raycaster());
+  const plane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)); // y=0 平面
+  const tmpVec = useRef(new THREE.Vector3());
 
-  // 數學平面：y=0
-  const ground = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), []);
-
-  // 繪圖時停用 OrbitControls
-  useEffect(() => {
-    if (!controlsRef?.current) return;
-    controlsRef.current.enabled = !(enabled && dragging.current);
-  }, [enabled, tick, controlsRef]);
-
-  // 讓 overlay 一定能被 Raycast（忽略遮擋）
-  useEffect(() => {
-    const m = overlayRef.current;
-    if (!m) return;
-    m.raycast = (raycaster, intersects) => {
-      const p = new THREE.Vector3();
-      if (raycaster.ray.intersectPlane(ground, p)) {
-        intersects.push({
-          distance: raycaster.ray.origin.distanceTo(p),
-          point: p.clone(),
-          object: m,
-        });
-      }
-    };
-  }, [ground]);
-
-  const onPointerDown = (e) => {
-    if (!enabled) return;
-    e.stopPropagation();
-    dragging.current = true;
-    start.current.copy(e.point);
-    curr.current.copy(e.point);
-    setTick((x) => x + 1);
+  const snap = (v) => {
+    if (!snapStep || snapStep <= 1) return v;
+    return Math.round(v / snapStep) * snapStep;
+    // 註：若要 0 表示不吸附，把條件改成 <=0
   };
 
-  const onPointerMove = (e) => {
-    if (!enabled || !dragging.current) return;
-    e.stopPropagation();
-    curr.current.copy(e.point);
-    setTick((x) => x + 1);
+  const ndcFromEvent = (e) => {
+    const rect = gl.domElement.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    return { x, y };
   };
 
-  const finish = () => {
-    if (!dragging.current) return;
-    dragging.current = false;
-    setTick((x) => x + 1);
+  const intersectOnPlane = (e) => {
+    const { x, y } = ndcFromEvent(e);
+    raycaster.current.setFromCamera({ x, y }, camera);
+    const point = new THREE.Vector3();
+    raycaster.current.ray.intersectPlane(plane.current, point);
+    return point;
+  };
 
-    const a = start.current, b = curr.current;
-    const dx = b.x - a.x, dz = b.z - a.z;
+  const ensurePreview = () => {
+    if (previewRef.current) return previewRef.current;
+    const g = new THREE.MeshStandardMaterial({
+      color: shape === "cyl" ? "#ffe08a" : "#8fd3ff",
+      transparent: true,
+      opacity: 0.4,
+      depthWrite: false,
+    });
+    let mesh;
+    if (shape === "cyl" || shape === "hole") {
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 48), g);
+    } else {
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), g);
+    }
+    mesh.visible = false;
+    scene.add(mesh);
+    previewRef.current = mesh;
+    return mesh;
+  };
 
-    if (shape === "box") {
-      const w = Math.max(Math.abs(dx), 1);
-      const d = Math.max(Math.abs(dz), 1);
-      const pos = [(a.x + b.x) / 2, height / 2, (a.z + b.z) / 2];
-      onCreate?.({ type: "box", w, h: height, d, pos, op: "add" });
-    } else if (shape === "cyl") {
-      const r = Math.max(Math.hypot(dx, dz) / 2, 1);
-      const pos = [b.x, height / 2, b.z];
-      onCreate?.({ type: "cyl", r, h: height, pos, axis: "y", op: "add" });
+  const clearPreview = () => {
+    if (previewRef.current) {
+      scene.remove(previewRef.current);
+      previewRef.current.geometry.dispose();
+      // material 可共用，不強制 dispose 以免誤刪
+      previewRef.current = null;
     }
   };
 
-  const onPointerUp = (e) => { e.stopPropagation(); finish(); };
-  const onPointerMissed = () => finish();
+  useEffect(() => {
+    if (!enabled) {
+      draggingRef.current = false;
+      clearPreview();
+      return;
+    }
 
-  // 預覽
-  const a = start.current, b = curr.current;
-  const dx = b.x - a.x, dz = b.z - a.z;
-  const previewBox = dragging.current && shape === "box"
-    ? { w: Math.max(Math.abs(dx), 1), d: Math.max(Math.abs(dz), 1), x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 }
-    : null;
-  const previewCyl = dragging.current && shape === "cyl"
-    ? { r: Math.max(Math.hypot(dx, dz) / 2, 1), x: b.x, z: b.z }
-    : null;
+    const onDown = (e) => {
+      if (!enabled) return;
+      e.preventDefault();
 
-  return (
-    <group>
-      {/* 全畫面透明覆蓋（永遠能點到 y=0 平面） */}
-      <mesh
-        ref={overlayRef}
-        position={[0, 0.001, 0]}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerMissed={onPointerMissed}
-        renderOrder={999}
-      >
-        <planeGeometry args={[10000, 10000]} />
-        <meshBasicMaterial transparent opacity={0} depthWrite={false} depthTest={false} />
-      </mesh>
+      // hole：單點放置
+      if (shape === "hole") {
+        const p = intersectOnPlane(e);
+        if (!isFinite(p.x) || !isFinite(p.z)) return;
+        const x = snap(p.x);
+        const z = snap(p.z);
+        onCreate?.({
+          type: "hole",
+          dia: holeDia,
+          pos: [x, 0, z],
+          depth: "thru",
+        });
+        return;
+      }
 
-      {/* 預覽幾何 */}
-      {previewBox && (
-        <mesh position={[previewBox.x, height / 2, previewBox.z]}>
-          <boxGeometry args={[previewBox.w, height, previewBox.d]} />
-          <meshStandardMaterial color="#22c55e" transparent opacity={0.35} />
-        </mesh>
-      )}
-      {previewCyl && (
-        <mesh position={[previewCyl.x, height / 2, previewCyl.z]}>
-          <cylinderGeometry args={[previewCyl.r, previewCyl.r, height, 32]} />
-          <meshStandardMaterial color="#22c55e" transparent opacity={0.35} />
-        </mesh>
-      )}
-    </group>
-  );
+      // box / cyl：開始拖曳
+      const p = intersectOnPlane(e);
+      if (!isFinite(p.x) || !isFinite(p.z)) return;
+      draggingRef.current = true;
+      startRef.current.set(snap(p.x), 0, snap(p.z));
+
+      const mesh = ensurePreview();
+      mesh.visible = true;
+      if (shape === "cyl") {
+        mesh.scale.set(1, 1, 1);
+        mesh.position.set(startRef.current.x, height / 2, startRef.current.z);
+      } else {
+        mesh.scale.set(1, 1, 1);
+        mesh.position.set(startRef.current.x, height / 2, startRef.current.z);
+      }
+    };
+
+    const onMove = (e) => {
+      if (!enabled) return;
+      if (!draggingRef.current) return;
+
+      const cur = intersectOnPlane(e);
+      if (!isFinite(cur.x) || !isFinite(cur.z)) return;
+
+      const sx = startRef.current.x;
+      const sz = startRef.current.z;
+      const ex = snap(cur.x);
+      const ez = snap(cur.z);
+
+      const mesh = ensurePreview();
+      mesh.visible = true;
+
+      if (shape === "cyl") {
+        const r = Math.max(1, Math.hypot(ex - sx, ez - sz));
+        mesh.geometry.dispose();
+        mesh.geometry = new THREE.CylinderGeometry(r, r, Math.max(1, height), 48);
+        mesh.position.set(sx, height / 2, sz);
+      } else {
+        const w = Math.max(1, Math.abs(ex - sx));
+        const d = Math.max(1, Math.abs(ez - sz));
+        const cx = (sx + ex) / 2;
+        const cz = (sz + ez) / 2;
+
+        mesh.geometry.dispose();
+        mesh.geometry = new THREE.BoxGeometry(w, Math.max(1, height), d);
+        mesh.position.set(cx, height / 2, cz);
+      }
+    };
+
+    const onUp = (e) => {
+      if (!enabled) return;
+
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+
+      const cur = intersectOnPlane(e);
+      if (!isFinite(cur.x) || !isFinite(cur.z)) {
+        clearPreview();
+        return;
+      }
+
+      const sx = startRef.current.x;
+      const sz = startRef.current.z;
+      const ex = snap(cur.x);
+      const ez = snap(cur.z);
+
+      if (shape === "cyl") {
+        const r = Math.max(1, Math.hypot(ex - sx, ez - sz));
+        onCreate?.({
+          type: "cyl",
+          r,
+          h: Math.max(1, height),
+          pos: [sx, Math.max(1, height) / 2, sz],
+          axis: "y",
+          op,
+        });
+      } else {
+        const w = Math.max(1, Math.abs(ex - sx));
+        const d = Math.max(1, Math.abs(ez - sz));
+        const cx = (sx + ex) / 2;
+        const cz = (sz + ez) / 2;
+        onCreate?.({
+          type: "box",
+          w,
+          h: Math.max(1, height),
+          d,
+          pos: [cx, Math.max(1, height) / 2, cz],
+          op,
+        });
+      }
+
+      clearPreview();
+    };
+
+    const dom = gl.domElement;
+    dom.addEventListener("pointerdown", onDown, { passive: false });
+    dom.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp, { passive: false });
+
+    return () => {
+      dom.removeEventListener("pointerdown", onDown);
+      dom.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      clearPreview();
+    };
+  }, [enabled, shape, op, height, holeDia, snapStep, gl, camera, scene, size, onCreate]);
+
+  return null; // 純行為元件（不渲染 React 內容，預覽用 three 物件）
 }
