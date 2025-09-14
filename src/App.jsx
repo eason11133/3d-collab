@@ -7,6 +7,7 @@ import { parseDSL } from "./dsl";
 import { parseNL } from "./nl";
 import PinLayer from "./PinLayer";
 import DrawTool from "./DrawTool";
+import Sketch2D from "./Sketch2D";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 
@@ -224,10 +225,15 @@ export default function App() {
   // 繪圖 UI 狀態
   const [drawEnabled, setDrawEnabled] = useState(false);
   const [drawShape, setDrawShape] = useState("box");      // 'box' | 'cyl' | 'hole'
-  const [drawOp, setDrawOp] = useState("add");            // 'add' | 'sub'（孔不需要）
+  const [drawOp, setDrawOp] = useState("add");            // 'add' | 'sub'
   const [drawHeight, setDrawHeight] = useState(20);
   const [holeDia, setHoleDia] = useState(8);
-  const [snapStep, setSnapStep] = useState(5);           // mm；0/1 代表不吸附
+  const [snapStep, setSnapStep] = useState(5);            // mm；0/1=>關閉
+
+  // 2D 草圖 overlay 狀態
+  const [showSketch2D, setShowSketch2D] = useState(false);
+  const [mmPerPx, setMmPerPx] = useState(0.5);
+  const [sketchAsHole, setSketchAsHole] = useState(false);
 
   // 幾何根 / 控制器 / 「生成當下相機姿態」
   const exportRootRef = useRef();
@@ -277,6 +283,14 @@ export default function App() {
       )})${depth}`;
     }
     return "";
+  };
+
+  // 追加 DSL 的小工具
+  const appendDSL = (prev, add) => {
+    const base = (prev || "").trim().replace(/;+$/,"");
+    const addTrim = (add || "").trim().replace(/;+$/,"");
+    if (!addTrim) return base;
+    return base ? `${base};\n${addTrim};` : `${addTrim};`;
   };
 
   /* ---------- 生成 3D ---------- */
@@ -370,7 +384,6 @@ export default function App() {
     if (cmds.length === 0) return;
     const next = cmds.slice(0, -1);
     setCmds(next);
-    // 直接用現有 cmds 重寫 DSL（會失去原本註解/排版，但簡單穩定）
     const dsl = next.map(cmdToDSL).filter(Boolean).join(";\n");
     setSrc(dsl ? dsl + ";" : "");
     requestAnimationFrame(() => {
@@ -385,6 +398,17 @@ export default function App() {
       const line = cmdToDSL(cmd);
       return prev ? `${prev.trim().replace(/;+$/,"")};\n${line};` : `${line};`;
     });
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: false } }));
+    });
+  };
+
+  /* ---------- 2D 草圖提交：追加一行 DSL 並生成 ---------- */
+  const handleSketchCommit = (dslLine) => {
+    if (!dslLine) return;
+    const next = appendDSL(src, dslLine);
+    setSrc(next);
+    setCmds(parseDSL(next));
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: false } }));
     });
@@ -494,6 +518,26 @@ export default function App() {
           />
         </div>
 
+        {/* 2D 草圖設定 */}
+        <h3 style={{ margin: "12px 0 8px" }}>🧭 2D 草圖（平面 → 3D）</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", alignItems: "center", gap: 8 }}>
+          <label>開啟 2D 草圖板</label>
+          <input type="checkbox" checked={showSketch2D} onChange={(e) => setShowSketch2D(e.target.checked)} />
+          <label>像素→毫米 (mm/px)</label>
+          <input
+            type="number"
+            step="0.1"
+            value={mmPerPx}
+            onChange={(e)=>setMmPerPx(Math.max(0.05, Number(e.target.value)||0.1))}
+            style={{ background:"#0b0e13", color:"#ddd", padding:"6px 8px" }}
+          />
+          <label>畫圓當作孔</label>
+          <input type="checkbox" checked={sketchAsHole} onChange={(e)=>setSketchAsHole(e.target.checked)} />
+        </div>
+        <div style={{ fontSize:12, opacity:.7, marginBottom:8 }}>
+          提示：2D 原點在畫布正中央；水平是 X、垂直是 Z。送出後會自動貼齊視角。
+        </div>
+
         <h3 style={{ margin: "12px 0 8px" }}>DSL（輸入後按「生成 3D」）</h3>
         <textarea
           value={src}
@@ -539,48 +583,63 @@ export default function App() {
         ))}
       </div>
 
-      {/* 右側 3D 畫布 */}
-      <Canvas
-        camera={{ position: [150, 120, 150], fov: 45 }}
-        style={{ background: "#0e1116" }}
-        gl={{ preserveDrawingBuffer: true, antialias: true }}
-        dpr={[1, 2]}
-      >
-        <color attach="background" args={["#0e1116"]} />
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[50, 80, 50]} intensity={0.85} />
-        <Grid args={[500, 50]} />
+      {/* 右側 3D 畫布（用 relative 容器包起來，讓 2D overlay 蓋上去） */}
+      <div style={{ position: "relative" }}>
+        <Canvas
+          camera={{ position: [150, 120, 150], fov: 45 }}
+          style={{ background: "#0e1116" }}
+          gl={{ preserveDrawingBuffer: true, antialias: true }}
+          dpr={[1, 2]}
+        >
+          <color attach="background" args={["#0e1116"]} />
+          <ambientLight intensity={0.6} />
+          <directionalLight position={[50, 80, 50]} intensity={0.85} />
+          <Grid args={[500, 50]} />
 
-        {/* 幾何 */}
-        <SceneFromParams commands={cmds} exportRef={exportRootRef} />
+          {/* 幾何 */}
+          <SceneFromParams commands={cmds} exportRef={exportRootRef} />
 
-        {/* 繪圖工具（在 y=0 平面） */}
-        <DrawTool
-          enabled={drawEnabled}
-          shape={drawShape}
-          op={drawOp}
-          height={drawHeight}
-          holeDia={holeDia}
-          snapStep={snapStep}
-          onCreate={handleDrawCreate}
-        />
+          {/* 繪圖工具（在 y=0 平面） */}
+          <DrawTool
+            enabled={drawEnabled}
+            shape={drawShape}
+            op={drawOp}
+            height={drawHeight}
+            holeDia={holeDia}
+            snapStep={snapStep}
+            onCreate={handleDrawCreate}
+          />
 
-        {/* 相機控制輔助 */}
-        <FitOnceHelper
-          exportRootRef={exportRootRef}
-          controlsRef={controlsRef}
-          initialPoseRef={initialPoseRef}
-        />
+          {/* 相機控制輔助 */}
+          <FitOnceHelper
+            exportRootRef={exportRootRef}
+            controlsRef={controlsRef}
+            initialPoseRef={initialPoseRef}
+          />
 
-        <PinLayer pins={pins} setPins={setPins} />
+          <PinLayer pins={pins} setPins={setPins} />
 
-        <OrbitControls ref={controlsRef} makeDefault />
-        <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
-          <GizmoViewport />
-        </GizmoHelper>
+          <OrbitControls ref={controlsRef} makeDefault />
+          <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
+            <GizmoViewport />
+          </GizmoHelper>
 
-        <ScreenshotTaker request={shotAsk} onDone={() => {}} />
-      </Canvas>
+          <ScreenshotTaker request={shotAsk} onDone={() => {}} />
+        </Canvas>
+
+        {/* 2D 草圖 overlay */}
+        {showSketch2D && (
+          <Sketch2D
+            enabled
+            onExit={() => setShowSketch2D(false)}
+            onCommit={handleSketchCommit}
+            mmPerPx={mmPerPx}
+            defaultBoxH={drawHeight}
+            defaultCylH={drawHeight}
+            defaultHole={sketchAsHole}
+          />
+        )}
+      </div>
     </div>
   );
 }
