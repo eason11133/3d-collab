@@ -115,7 +115,7 @@ function parseGLTF(exporter, input, onDone, options) {
   else exporter.parse(input, onDone, options);
 }
 
-/* ---------- 核心：fit 到模型；可選擇「記錄初始相機姿態」 ---------- */
+/* ---------- 貼齊到模型；可選擇「記錄初始相機姿態」 ---------- */
 function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false, maxTries = 20 }) {
   let tries = 0;
   const step = () => {
@@ -133,7 +133,6 @@ function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false
     const center = sphere.center.clone();
     const radius = Math.max(sphere.radius, 1e-3);
 
-    // 依目前視角方向往外退（保持使用者的觀看方向習慣）
     const fov = (camera.fov * Math.PI) / 180;
     const fitH = radius / Math.sin(fov / 2);
     const fitW = fitH / camera.aspect;
@@ -155,7 +154,6 @@ function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false
       controls.update();
     }
 
-    // ✅ 記錄「生成當下的相機姿態」
     if (record && recordPoseRef) {
       recordPoseRef.current = {
         pos: nextPos.clone(),
@@ -205,21 +203,12 @@ export default function App() {
   useEffect(() => localStorage.setItem("dsl", src), [src]);
   useEffect(() => localStorage.setItem("pins", JSON.stringify(pins)), [pins]);
 
-  /* ---------- 生成 3D：貼齊並「記錄初始視角」 ---------- */
-  const handleGenerate = () => {
-    setCmds(parseDSL(src));
-    // 等下一幀讓幾何掛上去再 fit
+  /* ---------- 生成 3D：可指定要用哪段 DSL（避免用到舊的 src） ---------- */
+  const handleGenerate = (dslText) => {
+    const text = dslText ?? src;
+    setCmds(parseDSL(text));
     requestAnimationFrame(() => {
-      const glRoot = exportRootRef.current;
-      const r3f = window.__R3F_APP__; // 可選：若你有把 context 掛到 window
-      // 直接從 Canvas 取
-      const canvasEl = document.querySelector("canvas");
-      // 用 useThree 無法在這裡直接拿，所以改為交給一個一次性的 helper
-      const doFit = () => {
-        // 用一個臨時 Three 取相機/controls（見下方 FitOnce）
-        window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
-      };
-      doFit();
+      window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
     });
   };
 
@@ -227,15 +216,13 @@ export default function App() {
   const handleResetView = () => {
     const pose = initialPoseRef.current;
     if (!pose) {
-      // 還沒生成過：退而求其次 → 做一次一般貼齊
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
       return;
     }
-    const ev = new CustomEvent("RESTORE_POSE", { detail: { pose } });
-    window.dispatchEvent(ev);
+    window.dispatchEvent(new CustomEvent("RESTORE_POSE", { detail: { pose } }));
   };
 
-  /* ---------- 讓外部（上面兩個 handler）能操作相機的內部 helper ---------- */
+  /* ---------- 讓外部 handler 能操作相機的內部 helper ---------- */
   function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
     const { camera, scene } = useThree();
     useEffect(() => {
@@ -281,33 +268,48 @@ export default function App() {
     const safe = prepareExportRoot(root);
     const exporter = new GLTFExporter();
     const opts = { binary: true, onlyVisible: true, truncateDrawRange: true, embedImages: true };
-    parseGLTF(exporter, safe, (res) => {
-      let ab = null;
-      if (res instanceof ArrayBuffer) ab = res;
-      else if (res && res.buffer instanceof ArrayBuffer) ab = res.buffer;
-      if (!ab) {
-        const exporter2 = new GLTFExporter();
-        parseGLTF(exporter2, safe, (json) => {
-          const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
-          downloadBlob(blob, `model-${Date.now()}.gltf`);
-        }, { binary: false });
-        return;
-      }
-      try {
-        const u8 = new Uint8Array(ab, 0, 4);
-        const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
-        if (magic !== "glTF") {
+    parseGLTF(
+      exporter,
+      safe,
+      (res) => {
+        let ab = null;
+        if (res instanceof ArrayBuffer) ab = res;
+        else if (res && res.buffer instanceof ArrayBuffer) ab = res.buffer;
+        if (!ab) {
           const exporter2 = new GLTFExporter();
-          parseGLTF(exporter2, safe, (json) => {
-            const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
-            downloadBlob(blob, `model-${Date.now()}.gltf`);
-          }, { binary: false });
+          parseGLTF(
+            exporter2,
+            safe,
+            (json) => {
+              const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
+              downloadBlob(blob, `model-${Date.now()}.gltf`);
+            },
+            { binary: false }
+          );
           return;
         }
-      } catch {}
-      const blob = new Blob([ab], { type: "model/gltf-binary" });
-      downloadBlob(blob, `model-${Date.now()}.glb`);
-    }, opts);
+        try {
+          const u8 = new Uint8Array(ab, 0, 4);
+          const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+          if (magic !== "glTF") {
+            const exporter2 = new GLTFExporter();
+            parseGLTF(
+              exporter2,
+              safe,
+              (json) => {
+                const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
+                downloadBlob(blob, `model-${Date.now()}.gltf`);
+              },
+              { binary: false }
+            );
+            return;
+          }
+        } catch {}
+        const blob = new Blob([ab], { type: "model/gltf-binary" });
+        downloadBlob(blob, `model-${Date.now()}.glb`);
+      },
+      opts
+    );
   }
 
   function exportSTL() {
@@ -356,8 +358,8 @@ export default function App() {
             onClick={() => {
               const dsl = parseNL(nl);
               if (!dsl) return alert("抱歉，這段中文我看不懂，再換個說法試試 🙏");
-              setSrc(dsl);
-              handleGenerate();
+              setSrc(dsl);          // 顯示在下方 DSL 欄
+              handleGenerate(dsl);  // 直接用這段 dsl 生成（避免用到舊的 src）
             }}
           >
             中文 → 生成
@@ -368,7 +370,7 @@ export default function App() {
               const found = EXAMPLES.find((x) => x.dsl === e.target.value);
               if (found) {
                 setSrc(found.dsl);
-                handleGenerate();
+                handleGenerate(found.dsl);
               }
             }}
             defaultValue=""
@@ -388,7 +390,7 @@ export default function App() {
           style={{ width: "100%", height: 200, background: "#0b0e13", color: "#ddd" }}
         />
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "8px 0 16px" }}>
-          <button onClick={handleGenerate}>生成 3D</button>
+          <button onClick={() => handleGenerate()}>生成 3D</button>
           <button onClick={handleResetView}>重製視角</button>
           <button onClick={() => setShotAsk((x) => x + 1)}>截圖 PNG</button>
           <button onClick={exportGLB}>Export GLB</button>
@@ -414,7 +416,12 @@ export default function App() {
       </div>
 
       {/* 右側 3D 畫布 */}
-      <Canvas camera={{ position: [150, 120, 150], fov: 45 }} style={{ background: "#0e1116" }} gl={{ preserveDrawingBuffer: true, antialias: true }} dpr={[1, 2]}>
+      <Canvas
+        camera={{ position: [150, 120, 150], fov: 45 }}
+        style={{ background: "#0e1116" }}
+        gl={{ preserveDrawingBuffer: true, antialias: true }}
+        dpr={[1, 2]}
+      >
         <color attach="background" args={["#0e1116"]} />
         <ambientLight intensity={0.6} />
         <directionalLight position={[50, 80, 50]} intensity={0.85} />
