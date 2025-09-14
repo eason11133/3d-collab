@@ -285,7 +285,7 @@ export default function App() {
     return "";
   };
 
-  // 追加 DSL 的小工具
+  // 追加 DSL 的小工具（合併多行、避免重複分號）
   const appendDSL = (prev, add) => {
     const base = (prev || "").trim().replace(/;+$/,"");
     const addTrim = (add || "").trim().replace(/;+$/,"");
@@ -403,12 +403,16 @@ export default function App() {
     });
   };
 
-  /* ---------- 2D 草圖提交：追加一行 DSL 並生成 ---------- */
-  const handleSketchCommit = (dslLine) => {
-    if (!dslLine) return;
-    const next = appendDSL(src, dslLine);
+  /* ---------- 2D 草圖提交：支援多筆（lines）並直接生成 3D ---------- */
+  const handleSketchCommit = (dslText) => {
+    if (!dslText) return;
+    // dslText 可能是多行：逐行清理、用分號連接
+    const lines = dslText.split(/\n+/).map((l) => l.trim().replace(/;+$/,"")).filter(Boolean);
+    const merged = lines.join(";\n") + ";";
+    const next = appendDSL(src, merged);
     setSrc(next);
     setCmds(parseDSL(next));
+    // 直接視角貼齊
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: false } }));
     });
