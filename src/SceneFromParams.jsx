@@ -33,7 +33,12 @@ function mkCyl({ r, h, pos, axis = "y", color = "#d1a860" }) {
 // hole：沿 y 軸打孔（忽略輸入的 y，對齊底座中心）
 function mkHoleCylinder({ dia, pos, depth, baseH }) {
   const r = dia / 2;
-  const h = depth === "thru" ? (baseH ?? 40) + 2 : (typeof depth === "number" ? depth : 20);
+  const h =
+    depth === "thru"
+      ? (baseH ?? 40) + 2
+      : typeof depth === "number"
+      ? depth
+      : 20;
   const mesh = new THREE.Mesh(
     new THREE.CylinderGeometry(r, r, h, 48),
     new THREE.MeshStandardMaterial({ color: "#ff4da6" })
@@ -44,25 +49,36 @@ function mkHoleCylinder({ dia, pos, depth, baseH }) {
   return mesh;
 }
 
-export default function SceneFromParams({ commands = [], exportRef }) {
-  // 找第一個 add 的 box 當底座
-  const baseCmd = commands.find((c) => c.type === "box" && c.op !== "sub");
+function mkMesh(c, baseHForHole) {
+  if (c.type === "box") return mkBox(c);
+  if (c.type === "cyl") return mkCyl(c);
+  if (c.type === "hole") return mkHoleCylinder({ ...c, baseH: baseHForHole });
+  return null;
+}
 
-  // 沒底座就只畫 add 幾何（無 CSG）
+export default function SceneFromParams({ commands = [], exportRef }) {
+  // ✅ 把「第一個加法幾何（box 或 cyl）」當成基底
+  const baseIdx = commands.findIndex(
+    (c) => (c.type === "box" || c.type === "cyl") && c.op !== "sub"
+  );
+  const baseCmd = baseIdx >= 0 ? commands[baseIdx] : null;
+
+  // 沒有可當基底的幾何 → 直接畫出加法幾何（不做 CSG），洞只顯示標記
   if (!baseCmd) {
     return (
       <>
-        <group ref={exportRef} name="EXPORT_ROOT" userData={{ exportable: true }}>
+        <group ref={exportRef}>
           {commands.map((c, i) => {
-            if (c.type === "box" && c.op !== "sub") return <primitive key={i} object={mkBox(c)} />;
-            if (c.type === "cyl" && c.op !== "sub") return <primitive key={i} object={mkCyl(c)} />;
+            if (c.op === "sub") return null; // 沒基底無法 subtract
+            if (c.type === "box") return <primitive key={i} object={mkBox(c)} />;
+            if (c.type === "cyl") return <primitive key={i} object={mkCyl(c)} />;
             return null;
           })}
         </group>
         {commands.map((c, i) =>
           c.type === "hole" ? (
             <mesh key={"mark-" + i} position={c.pos}>
-              <sphereGeometry args={[c.dia / 2, 16, 16]} />
+              <sphereGeometry args={[Math.max(2, c.dia / 3), 12, 12]} />
               <meshBasicMaterial color="red" wireframe />
             </mesh>
           ) : null
@@ -71,26 +87,28 @@ export default function SceneFromParams({ commands = [], exportRef }) {
     );
   }
 
-  // CSG：底座 -> subtract -> union
-  const baseMesh = mkBox(baseCmd);
+  // ✅ 有基底：做 CSG（先 subtract 再 union）
+  const baseMesh =
+    baseCmd.type === "box" ? mkBox(baseCmd) : mkCyl(baseCmd);
   let csg = CSG.fromMesh(baseMesh);
 
+  // subtract（包含 hole）
   for (const c of commands) {
     if (c === baseCmd) continue;
-    if (c.op === "sub") {
-      let cutter;
-      if (c.type === "cyl") cutter = mkCyl({ ...c, color: "#888888" });
-      else if (c.type === "hole") cutter = mkHoleCylinder({ ...c, baseH: baseCmd.h });
-      else if (c.type === "box") cutter = mkBox(c);
+    if (c.op === "sub" || c.type === "hole") {
+      const cutter =
+        c.type === "hole"
+          ? mkHoleCylinder({ ...c, baseH: baseCmd.h ?? 40 })
+          : mkMesh(c, baseCmd.h ?? 40);
       if (cutter) csg = csg.subtract(CSG.fromMesh(cutter));
     }
   }
+
+  // union（其餘加法幾何）
   for (const c of commands) {
     if (c === baseCmd) continue;
-    if (c.op !== "sub") {
-      let addMesh;
-      if (c.type === "box") addMesh = mkBox(c);
-      else if (c.type === "cyl") addMesh = mkCyl(c);
+    if (c.op !== "sub" && c.type !== "hole") {
+      const addMesh = mkMesh(c);
       if (addMesh) csg = csg.union(CSG.fromMesh(addMesh));
     }
   }
@@ -98,12 +116,12 @@ export default function SceneFromParams({ commands = [], exportRef }) {
   const result = CSG.toMesh(csg, baseMesh.matrix, baseMesh.material.clone());
   result.castShadow = result.receiveShadow = true;
 
-  // 匯出根只包可匯出的實體；孔位紅球是視覺標記（不進匯出）
   return (
     <>
-      <group ref={exportRef} name="EXPORT_ROOT" userData={{ exportable: true }}>
+      <group ref={exportRef}>
         <primitive object={result} />
       </group>
+      {/* 洞的紅色標記（不匯出） */}
       {commands.map((c, i) =>
         c.type === "hole" ? (
           <mesh key={"mark-" + i} position={c.pos}>
