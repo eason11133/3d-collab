@@ -39,16 +39,22 @@ cylinder r=10 h=50 at(0,0,5) axis=z;`,
 
 const SAMPLE = EXAMPLES[0].dsl;
 
-/* ------- 工具：置中相機 ------- */
+/* ---------- 穩定重置視角：雙幀 fit，且強制重掛 Bounds ---------- */
 function AutoFit({ deps }) {
   const api = useBounds();
   useEffect(() => {
-    api.refresh().fit();
+    // 連續兩幀 fit，避免幾何剛掛上去時 AABB 還沒穩定
+    const id1 = requestAnimationFrame(() => api.refresh().fit());
+    const id2 = requestAnimationFrame(() => api.refresh().fit());
+    return () => {
+      cancelAnimationFrame(id1);
+      cancelAnimationFrame(id2);
+    };
   }, [api, deps]);
   return null;
 }
 
-/* ------- 工具：穩定截圖（保留緩衝、等一幀後 toBlob） ------- */
+/* ---------- 截圖（等一幀後 toBlob） ---------- */
 function ScreenshotTaker({ request, onDone }) {
   const { gl, scene, camera } = useThree();
   useEffect(() => {
@@ -84,7 +90,7 @@ function ScreenshotTaker({ request, onDone }) {
   return null;
 }
 
-/* ------- 共用：Blob 下載 ------- */
+/* ---------- 共用：下載 Blob ---------- */
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -94,7 +100,7 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-/* ------- 匯出前整理（套變換/法線/材質） ------- */
+/* ---------- 匯出前整理（烘入世界變換/補法線/材質固定） ---------- */
 function prepareExportRoot(root) {
   const clone = root.clone(true);
   clone.updateWorldMatrix?.(true, true);
@@ -105,13 +111,17 @@ function prepareExportRoot(root) {
         : new THREE.BufferGeometry().fromGeometry(obj.geometry);
       g = g.clone();
       g.applyMatrix4(obj.matrixWorld);
+
+      // 清空 transform，避免重複套用
       obj.matrixWorld.identity();
       obj.matrix.identity();
       obj.position.set(0, 0, 0);
       obj.rotation.set(0, 0, 0);
       obj.scale.set(1, 1, 1);
+
       if (!g.attributes.normal) g.computeVertexNormals();
       obj.geometry = g;
+
       obj.material = new THREE.MeshStandardMaterial({
         color:
           (obj.material && obj.material.color && obj.material.color.getHex()) ||
@@ -125,10 +135,9 @@ function prepareExportRoot(root) {
   return clone;
 }
 
-/* ------- 分享連結編解碼 ------- */
+/* ---------- 分享連結編解碼 ---------- */
 function encodeShare(payload) {
   const txt = JSON.stringify(payload);
-  // UTF-8 safe base64
   return btoa(unescape(encodeURIComponent(txt)));
 }
 function decodeShare(s) {
@@ -140,13 +149,33 @@ function decodeShare(s) {
   }
 }
 
+/* ---------- 兼容不同 three 版本的 GLTFExporter.parse 簽名 ---------- */
+function parseGLTF(exporter, input, onDone, options) {
+  const len = exporter.parse.length;
+  if (len >= 4) {
+    // (input, onDone, onError, options)
+    exporter.parse(
+      input,
+      onDone,
+      (err) => {
+        console.error("GLTF export error:", err);
+        alert("匯出失敗（GLTFExporter）：請看 console 錯誤訊息");
+      },
+      options
+    );
+  } else {
+    // (input, onDone, options)
+    exporter.parse(input, onDone, options);
+  }
+}
+
 export default function App() {
   const [src, setSrc] = useState(() => localStorage.getItem("dsl") || SAMPLE);
   const [cmds, setCmds] = useState(() =>
     parseDSL(localStorage.getItem("dsl") || SAMPLE)
   );
 
-  const [nl, setNL] = useState(""); // 中文描述
+  const [nl, setNL] = useState("");
   const [pins, setPins] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("pins") || "[]");
@@ -159,7 +188,7 @@ export default function App() {
   const [shotAsk, setShotAsk] = useState(0);
   const exportRootRef = useRef(); // 只包「可匯出」的實體
 
-  // 讀分享連結（?s=...）
+  // 啟動時讀取分享連結 (?s=...)
   useEffect(() => {
     const u = new URL(window.location.href);
     const s = u.searchParams.get("s");
@@ -170,7 +199,6 @@ export default function App() {
         setCmds(parseDSL(p.dsl));
       }
       if (Array.isArray(p?.pins)) setPins(p.pins);
-      // 清掉 query（避免存到 localStorage 後每次重整又套一次）
       u.searchParams.delete("s");
       window.history.replaceState({}, "", u.pathname);
     }
@@ -189,35 +217,77 @@ export default function App() {
     [cmds, resetAsk]
   );
 
-  /* ------- 匯出 GLB ------- */
+  /* ---------- 匯出 GLB（含 JSON 後備與魔術字檢查） ---------- */
   function exportGLB() {
     const root = exportRootRef.current;
     if (!root) return alert("沒有可匯出的幾何，請先按「生成 3D」。");
+
     const safe = prepareExportRoot(root);
     const exporter = new GLTFExporter();
-    exporter.parse(
-      safe,
-      (res) => {
-        let blob;
-        if (res instanceof ArrayBuffer) {
-          blob = new Blob([res], { type: "model/gltf-binary" });
-        } else if (res && res.buffer instanceof ArrayBuffer) {
-          blob = new Blob([res.buffer], { type: "model/gltf-binary" });
-        } else if (typeof res === "object") {
-          blob = new Blob([JSON.stringify(res)], {
-            type: "application/json",
-          });
-        } else {
-          alert("匯出失敗：未知輸出格式");
+    const opts = {
+      binary: true,
+      onlyVisible: true,
+      truncateDrawRange: true,
+      embedImages: true,
+    };
+
+    parseGLTF(exporter, safe, async (res) => {
+      // 盡量取得 ArrayBuffer
+      let ab = null;
+      if (res instanceof ArrayBuffer) {
+        ab = res;
+      } else if (res && res.buffer instanceof ArrayBuffer) {
+        ab = res.buffer; // TypedArray
+      }
+
+      if (!ab) {
+        // 不是二進位：退回 JSON glTF
+        console.warn("GLB 未生成，改存 JSON glTF。");
+        const exporter2 = new GLTFExporter();
+        parseGLTF(
+          exporter2,
+          safe,
+          (json) => {
+            const blob = new Blob([JSON.stringify(json)], {
+              type: "application/json",
+            });
+            downloadBlob(blob, `model-${Date.now()}.gltf`);
+          },
+          { binary: false }
+        );
+        return;
+      }
+
+      // 檢查 magic "glTF"
+      try {
+        const u8 = new Uint8Array(ab, 0, 4);
+        const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+        if (magic !== "glTF") {
+          console.warn("GLB magic 非 glTF，改存 JSON glTF。magic =", magic);
+          const exporter2 = new GLTFExporter();
+          parseGLTF(
+            exporter2,
+            safe,
+            (json) => {
+              const blob = new Blob([JSON.stringify(json)], {
+                type: "application/json",
+              });
+              downloadBlob(blob, `model-${Date.now()}.gltf`);
+            },
+            { binary: false }
+          );
           return;
         }
-        downloadBlob(blob, `model-${Date.now()}.glb`);
-      },
-      { binary: true, onlyVisible: true, truncateDrawRange: true, embedImages: true }
-    );
+      } catch (e) {
+        console.warn("檢查 GLB magic 失敗，仍嘗試下載。", e);
+      }
+
+      const blob = new Blob([ab], { type: "model/gltf-binary" });
+      downloadBlob(blob, `model-${Date.now()}.glb`);
+    }, opts);
   }
 
-  /* ------- 匯出 STL（ASCII） ------- */
+  /* ---------- 匯出 STL（ASCII） ---------- */
   function exportSTL() {
     const root = exportRootRef.current;
     if (!root) return alert("沒有可匯出的幾何，請先按「生成 3D」。");
@@ -228,7 +298,7 @@ export default function App() {
     downloadBlob(blob, `model-${Date.now()}.stl`);
   }
 
-  /* ------- 分享連結 ------- */
+  /* ---------- 分享連結 ---------- */
   async function shareLink() {
     const payload = { dsl: src, pins };
     const s = encodeShare(payload);
@@ -389,9 +459,10 @@ export default function App() {
         <color attach="background" args={["#0e1116"]} />
         <ambientLight intensity={0.6} />
         <directionalLight position={[50, 80, 50]} intensity={0.85} />
-        <Grid args={[500, 50]} sectionColor="#4b5563" cellColor="#374151" />
+        <Grid args={[500, 50]} />
 
-        <Bounds clip observe margin={1}>
+        {/* 這裡 key={deps} 讓 Bounds 在重置時重新掛載，保證 fit 生效 */}
+        <Bounds key={deps} clip observe margin={1}>
           <SceneFromParams commands={cmds} exportRef={exportRootRef} />
           <PinLayer pins={pins} setPins={setPins} />
           <AutoFit deps={deps} />
