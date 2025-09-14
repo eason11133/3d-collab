@@ -230,7 +230,7 @@ export default function App() {
   const controlsRef = useRef();
   const initialPoseRef = useRef(null);
 
-  // 啟動參數分享
+  // 分享連結參數
   useEffect(() => {
     const u = new URL(window.location.href);
     const s = u.searchParams.get("s");
@@ -256,6 +256,7 @@ export default function App() {
   useEffect(() => localStorage.setItem("pins", JSON.stringify(pins)), [pins]);
 
   /* ---------- 工具：cmd 轉 DSL 行 ---------- */
+  const round = (n) => (typeof n === "number" ? Math.round(n * 100) / 100 : n);
   const cmdToDSL = (c) => {
     if (c.type === "box")
       return `box w=${round(c.w)} h=${round(c.h)} d=${round(c.d)} at(${round(c.pos[0])},${round(
@@ -273,7 +274,6 @@ export default function App() {
     }
     return "";
   };
-  const round = (n) => (typeof n === "number" ? Math.round(n * 100) / 100 : n);
 
   /* ---------- 生成 3D ---------- */
   const handleGenerate = (dslText) => {
@@ -321,6 +321,7 @@ export default function App() {
             }
           } catch {}
         }
+        // 退回 JSON glTF
         const exporter2 = new GLTFExporter();
         parseGLTF(
           exporter2,
@@ -364,7 +365,6 @@ export default function App() {
       const line = cmdToDSL(cmd);
       return prev ? `${prev.trim().replace(/;+$/,"")};\n${line};` : `${line};`;
     });
-    // 加完後置中，但不要覆蓋「生成當下」的重置姿態
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: false } }));
     });
@@ -482,7 +482,7 @@ export default function App() {
         <directionalLight position={[50, 80, 50]} intensity={0.85} />
         <Grid args={[500, 50]} />
 
-        {/* 你的幾何 */}
+        {/* 幾何 */}
         <SceneFromParams commands={cmds} exportRef={exportRootRef} />
 
         {/* 繪圖工具（在 y=0 拖曳） */}
