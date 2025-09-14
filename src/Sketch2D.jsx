@@ -27,16 +27,15 @@ function simplifyRDP(points, eps = 2) {
   return [points[0], points[points.length - 1]];
 }
 
-/** 將辨識到的圖形自動矯正為標準形狀 */
+/** 自動修正形狀 */
 function snapShape(kind, pts) {
   if (kind === "line") {
     const p1 = pts[0], p2 = pts[pts.length - 1];
     const dx = p2.x - p1.x, dy = p2.y - p1.y;
-    if (Math.abs(dx) > Math.abs(dy)) {
+    if (Math.abs(dx) > Math.abs(dy))
       return [{x:p1.x,y:p1.y},{x:p2.x,y:p1.y}];
-    } else {
+    else
       return [{x:p1.x,y:p1.y},{x:p1.x,y:p2.y}];
-    }
   }
   if (kind === "circle") {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -74,7 +73,7 @@ function snapShape(kind, pts) {
   return pts;
 }
 
-/** 圖形辨識 + 類型推斷 */
+/** 圖形辨識 */
 function recognizeStroke(pts) {
   if (pts.length < 6) return null;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -129,6 +128,18 @@ export default function Sketch2D({
   const [pts, setPts] = useState([]);
   const [lastGuess, setLastGuess] = useState(null);
   const [asHole, setAsHole] = useState(defaultHole);
+
+  // 初始化像素大小
+  useEffect(() => {
+    if (!enabled) return;
+    const cvs = canvasRef.current;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = cvs.getBoundingClientRect();
+    cvs.width = Math.round(rect.width * dpr);
+    cvs.height = Math.round(rect.height * dpr);
+    const ctx = cvs.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }, [enabled]);
 
   // 畫背景+筆跡
   const draw = () => {
@@ -192,9 +203,7 @@ export default function Sketch2D({
       setPts((arr) => {
         const first = arr[0];
         const last = arr[arr.length - 1];
-        if (Math.hypot(first.x - last.x, first.y - last.y) < 16) {
-          arr.push(first);
-        }
+        if (Math.hypot(first.x - last.x, first.y - last.y) < 16) arr.push(first);
         const guess = recognizeStroke(arr);
         setLastGuess(guess);
         return guess?.pts || arr;
