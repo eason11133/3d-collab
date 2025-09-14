@@ -31,7 +31,8 @@ cylinder r=10 h=50 at(0,0,5) axis=z;`,
   },
 ];
 
-const SAMPLE = EXAMPLES[0].dsl;
+// 預設不要任何模型
+const SAMPLE = "";
 
 /* ---------- 截圖 ---------- */
 function ScreenshotTaker({ request, onDone }) {
@@ -207,8 +208,9 @@ function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
 }
 
 export default function App() {
-  const [src, setSrc] = useState(() => localStorage.getItem("dsl") || SAMPLE);
-  const [cmds, setCmds] = useState(() => parseDSL(localStorage.getItem("dsl") || SAMPLE));
+  // ✅ 初始就是空白場景（不讀 localStorage）
+  const [src, setSrc] = useState(SAMPLE); // ""
+  const [cmds, setCmds] = useState([]);   // []
   const [nl, setNL] = useState("");
 
   const [pins, setPins] = useState(() => {
@@ -230,7 +232,7 @@ export default function App() {
   const controlsRef = useRef();
   const initialPoseRef = useRef(null);
 
-  // 分享連結參數
+  // 分享連結參數（若有 ?s=... 仍可載入）
   useEffect(() => {
     const u = new URL(window.location.href);
     const s = u.searchParams.get("s");
@@ -279,6 +281,10 @@ export default function App() {
   const handleGenerate = (dslText) => {
     const text = dslText ?? src;
     setSrc(text);
+    if (!text.trim()) {
+      setCmds([]); // 空字串 -> 清空模型
+      return;      // 不自動置中相機
+    }
     setCmds(parseDSL(text));
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
@@ -442,11 +448,24 @@ export default function App() {
         <textarea
           value={src}
           onChange={(e) => setSrc(e.target.value)}
+          placeholder="這裡目前是空的。請用上方「中文→生成」，或手動輸入 DSL 後按「生成 3D」。"
           style={{ width: "100%", height: 200, background: "#0b0e13", color: "#ddd" }}
         />
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "8px 0 16px" }}>
           <button onClick={() => handleGenerate()}>生成 3D</button>
           <button onClick={handleResetView}>重製視角</button>
+          <button
+            onClick={() => {
+              // 新專案：清空一切
+              setSrc("");
+              setCmds([]);
+              setPins([]);
+              localStorage.removeItem("dsl");
+              localStorage.removeItem("pins");
+            }}
+          >
+            新專案（清空）
+          </button>
           <button onClick={() => setShotAsk((x) => x + 1)}>截圖 PNG</button>
           <button onClick={exportGLB}>Export GLB</button>
           <button onClick={exportSTL}>Export STL</button>
