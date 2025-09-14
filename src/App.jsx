@@ -40,16 +40,20 @@ function ScreenshotTaker({ request, onDone }) {
     const raf = requestAnimationFrame(() => {
       try {
         gl.render(scene, camera);
-        gl.domElement.toBlob((blob) => {
-          if (!blob) return onDone?.();
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = `snapshot-${Date.now()}.png`;
-          a.click();
-          setTimeout(() => URL.revokeObjectURL(url), 2000);
-          onDone?.();
-        }, "image/png", 1);
+        gl.domElement.toBlob(
+          (blob) => {
+            if (!blob) return onDone?.();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `snapshot-${Date.now()}.png`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            onDone?.();
+          },
+          "image/png",
+          1
+        );
       } catch {
         const url = gl.domElement.toDataURL("image/png");
         const a = document.createElement("a");
@@ -115,17 +119,18 @@ function parseGLTF(exporter, input, onDone, options) {
   else exporter.parse(input, onDone, options);
 }
 
-/* ---------- 貼齊到模型；可選擇「記錄初始相機姿態」 ---------- */
-function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false, maxTries = 20 }) {
-  let tries = 0;
-  const step = () => {
-    tries++;
-    if (!root) return tries < maxTries ? requestAnimationFrame(step) : undefined;
+/* ---------- 置中到模型並可記錄當下相機姿態 ---------- */
+function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false }) {
+  if (!root) return;
 
+  // 容錯：多試幾次直到有包圍盒
+  let tries = 0;
+  const tick = () => {
+    tries++;
     root.updateWorldMatrix(true, true);
     const box = new THREE.Box3().setFromObject(root);
     if (!isFinite(box.min.x) || box.isEmpty()) {
-      if (tries < maxTries) return requestAnimationFrame(step);
+      if (tries < 20) return requestAnimationFrame(tick);
       return;
     }
 
@@ -164,7 +169,45 @@ function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false
       };
     }
   };
-  requestAnimationFrame(step);
+  requestAnimationFrame(tick);
+}
+
+/* ---------- 讓外部能呼叫 FIT / RESTORE，相機在 Canvas 內取得 ---------- */
+function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
+  const { camera, scene } = useThree();
+  useEffect(() => {
+    const onFitOnce = (e) => {
+      const record = !!(e.detail && e.detail.record);
+      const root = exportRootRef.current || scene.getObjectByName("EXPORT_ROOT");
+      fitToExportRoot({
+        root,
+        camera,
+        controls: controlsRef.current,
+        recordPoseRef: initialPoseRef,
+        record,
+      });
+    };
+    const onRestore = (e) => {
+      const pose = e.detail?.pose;
+      if (!pose) return;
+      camera.position.copy(pose.pos);
+      camera.near = pose.near ?? camera.near;
+      camera.far = pose.far ?? camera.far;
+      camera.fov = pose.fov ?? camera.fov;
+      camera.updateProjectionMatrix();
+      if (controlsRef.current) {
+        controlsRef.current.target.copy(pose.target);
+        controlsRef.current.update();
+      }
+    };
+    window.addEventListener("FIT_ONCE", onFitOnce);
+    window.addEventListener("RESTORE_POSE", onRestore);
+    return () => {
+      window.removeEventListener("FIT_ONCE", onFitOnce);
+      window.removeEventListener("RESTORE_POSE", onRestore);
+    };
+  }, [camera, scene, exportRootRef, controlsRef, initialPoseRef]);
+  return null;
 }
 
 export default function App() {
@@ -172,16 +215,20 @@ export default function App() {
   const [cmds, setCmds] = useState(() => parseDSL(localStorage.getItem("dsl") || SAMPLE));
   const [nl, setNL] = useState("");
   const [pins, setPins] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("pins") || "[]"); } catch { return []; }
+    try {
+      return JSON.parse(localStorage.getItem("pins") || "[]");
+    } catch {
+      return [];
+    }
   });
   const [shotAsk, setShotAsk] = useState(0);
 
-  // 幾何根 / 控制器 / 「初始相機姿態（生成當下）」記錄
+  // 幾何根 / 控制器 / 「生成當下的相機姿態」
   const exportRootRef = useRef();
   const controlsRef = useRef();
   const initialPoseRef = useRef(null);
 
-  // 分享連結參數
+  // 分享連結參數（可載入 DSL + pins）
   useEffect(() => {
     const u = new URL(window.location.href);
     const s = u.searchParams.get("s");
@@ -192,6 +239,9 @@ export default function App() {
         if (p?.dsl) {
           setSrc(p.dsl);
           setCmds(parseDSL(p.dsl));
+          requestAnimationFrame(() => {
+            window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
+          });
         }
         if (Array.isArray(p?.pins)) localStorage.setItem("pins", JSON.stringify(p.pins));
       } catch {}
@@ -203,16 +253,18 @@ export default function App() {
   useEffect(() => localStorage.setItem("dsl", src), [src]);
   useEffect(() => localStorage.setItem("pins", JSON.stringify(pins)), [pins]);
 
-  /* ---------- 生成 3D：可指定要用哪段 DSL（避免用到舊的 src） ---------- */
+  /* ---------- 生成 3D ---------- */
   const handleGenerate = (dslText) => {
     const text = dslText ?? src;
-    setCmds(parseDSL(text));
+    setSrc(text);            // 同步到下方 DSL 欄
+    setCmds(parseDSL(text)); // 更新指令
+    // 等一幀 → 嘗試 fit，並「記錄」這個生成當下的相機姿態
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
     });
   };
 
-  /* ---------- 重設視角：回到「生成當下記錄的姿態」 ---------- */
+  /* ---------- 重設視角：回到生成當下 ---------- */
   const handleResetView = () => {
     const pose = initialPoseRef.current;
     if (!pose) {
@@ -222,45 +274,6 @@ export default function App() {
     window.dispatchEvent(new CustomEvent("RESTORE_POSE", { detail: { pose } }));
   };
 
-  /* ---------- 讓外部 handler 能操作相機的內部 helper ---------- */
-  function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
-    const { camera, scene } = useThree();
-    useEffect(() => {
-      const onFitOnce = (e) => {
-        const record = !!(e.detail && e.detail.record);
-        const root = exportRootRef.current || scene.getObjectByName("EXPORT_ROOT");
-        fitToExportRoot({
-          root,
-          camera,
-          controls: controlsRef.current,
-          recordPoseRef: initialPoseRef,
-          record,
-          maxTries: 20,
-        });
-      };
-      const onRestore = (e) => {
-        const pose = e.detail?.pose;
-        if (!pose) return;
-        camera.position.copy(pose.pos);
-        camera.near = pose.near ?? camera.near;
-        camera.far = pose.far ?? camera.far;
-        camera.fov = pose.fov ?? camera.fov;
-        camera.updateProjectionMatrix();
-        if (controlsRef.current) {
-          controlsRef.current.target.copy(pose.target);
-          controlsRef.current.update();
-        }
-      };
-      window.addEventListener("FIT_ONCE", onFitOnce);
-      window.addEventListener("RESTORE_POSE", onRestore);
-      return () => {
-        window.removeEventListener("FIT_ONCE", onFitOnce);
-        window.removeEventListener("RESTORE_POSE", onRestore);
-      };
-    }, [camera, scene]);
-    return null;
-  }
-
   /* ---------- 匯出 ---------- */
   function exportGLB() {
     const root = exportRootRef.current;
@@ -268,6 +281,7 @@ export default function App() {
     const safe = prepareExportRoot(root);
     const exporter = new GLTFExporter();
     const opts = { binary: true, onlyVisible: true, truncateDrawRange: true, embedImages: true };
+
     parseGLTF(
       exporter,
       safe,
@@ -275,38 +289,29 @@ export default function App() {
         let ab = null;
         if (res instanceof ArrayBuffer) ab = res;
         else if (res && res.buffer instanceof ArrayBuffer) ab = res.buffer;
-        if (!ab) {
-          const exporter2 = new GLTFExporter();
-          parseGLTF(
-            exporter2,
-            safe,
-            (json) => {
-              const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
-              downloadBlob(blob, `model-${Date.now()}.gltf`);
-            },
-            { binary: false }
-          );
-          return;
+
+        // 若不是有效 GLB，改輸出 glTF JSON 備援
+        if (ab) {
+          try {
+            const u8 = new Uint8Array(ab, 0, 4);
+            const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+            if (magic === "glTF") {
+              const blob = new Blob([ab], { type: "model/gltf-binary" });
+              downloadBlob(blob, `model-${Date.now()}.glb`);
+              return;
+            }
+          } catch {}
         }
-        try {
-          const u8 = new Uint8Array(ab, 0, 4);
-          const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
-          if (magic !== "glTF") {
-            const exporter2 = new GLTFExporter();
-            parseGLTF(
-              exporter2,
-              safe,
-              (json) => {
-                const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
-                downloadBlob(blob, `model-${Date.now()}.gltf`);
-              },
-              { binary: false }
-            );
-            return;
-          }
-        } catch {}
-        const blob = new Blob([ab], { type: "model/gltf-binary" });
-        downloadBlob(blob, `model-${Date.now()}.glb`);
+        const exporter2 = new GLTFExporter();
+        parseGLTF(
+          exporter2,
+          safe,
+          (json) => {
+            const blob = new Blob([JSON.stringify(json)], { type: "application/json" });
+            downloadBlob(blob, `model-${Date.now()}.gltf`);
+          },
+          { binary: false }
+        );
       },
       opts
     );
@@ -358,8 +363,7 @@ export default function App() {
             onClick={() => {
               const dsl = parseNL(nl);
               if (!dsl) return alert("抱歉，這段中文我看不懂，再換個說法試試 🙏");
-              setSrc(dsl);          // 顯示在下方 DSL 欄
-              handleGenerate(dsl);  // 直接用這段 dsl 生成（避免用到舊的 src）
+              handleGenerate(dsl); // 直接以這段 DSL 生成（並同步到下方 DSL 欄位）
             }}
           >
             中文 → 生成
@@ -368,17 +372,16 @@ export default function App() {
           <select
             onChange={(e) => {
               const found = EXAMPLES.find((x) => x.dsl === e.target.value);
-              if (found) {
-                setSrc(found.dsl);
-                handleGenerate(found.dsl);
-              }
+              if (found) handleGenerate(found.dsl);
             }}
             defaultValue=""
             style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }}
           >
             <option value="" disabled>載入範例…</option>
             {EXAMPLES.map((ex) => (
-              <option key={ex.label} value={ex.dsl}>{ex.label}</option>
+              <option key={ex.label} value={ex.dsl}>
+                {ex.label}
+              </option>
             ))}
           </select>
         </div>
@@ -401,14 +404,23 @@ export default function App() {
         <h4 style={{ margin: "12px 0 8px" }}>Pins（點模型可插針）</h4>
         {pins.length === 0 && <div style={{ opacity: 0.7 }}>點 3D 模型來新增 Pin</div>}
         {pins.map((p) => (
-          <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, marginBottom: 8 }}>
+          <div
+            key={p.id}
+            style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, marginBottom: 8 }}
+          >
             <input
               value={p.note}
               placeholder={`備註（${p.pos.map((n) => n.toFixed(1)).join(", ")})`}
               onChange={(e) =>
                 setPins((arr) => arr.map((x) => (x.id === p.id ? { ...x, note: e.target.value } : x)))
               }
-              style={{ background: "#0b0e13", color: "#ddd", border: "1px solid #333", padding: "6px 8px", borderRadius: 6 }}
+              style={{
+                background: "#0b0e13",
+                color: "#ddd",
+                border: "1px solid #333",
+                padding: "6px 8px",
+                borderRadius: 6,
+              }}
             />
             <button onClick={() => setPins((arr) => arr.filter((x) => x.id !== p.id))}>刪除</button>
           </div>
@@ -428,14 +440,11 @@ export default function App() {
         <Grid args={[500, 50]} />
 
         <SceneFromParams commands={cmds} exportRef={exportRootRef} />
-
-        {/* 讓外部 handler 可以一次性操作相機 */}
         <FitOnceHelper
           exportRootRef={exportRootRef}
           controlsRef={controlsRef}
           initialPoseRef={initialPoseRef}
         />
-
         <PinLayer pins={pins} setPins={setPins} />
 
         <OrbitControls ref={controlsRef} makeDefault />
