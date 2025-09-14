@@ -7,6 +7,7 @@ import SceneFromParams from "./SceneFromParams";
 import { parseDSL } from "./dsl";
 import { parseNL } from "./nl";
 import PinLayer from "./PinLayer";
+import DrawTool from "./DrawTool";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 
@@ -119,11 +120,9 @@ function parseGLTF(exporter, input, onDone, options) {
   else exporter.parse(input, onDone, options);
 }
 
-/* ---------- 置中到模型並可記錄當下相機姿態 ---------- */
+/* ---------- 一次置中到幾何；可記錄姿態 ---------- */
 function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false }) {
   if (!root) return;
-
-  // 容錯：多試幾次直到有包圍盒
   let tries = 0;
   const tick = () => {
     tries++;
@@ -133,7 +132,6 @@ function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false
       if (tries < 20) return requestAnimationFrame(tick);
       return;
     }
-
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const center = sphere.center.clone();
     const radius = Math.max(sphere.radius, 1e-3);
@@ -153,12 +151,10 @@ function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false
     camera.near = Math.max(distance / 100, 0.01);
     camera.far = distance * 100;
     camera.updateProjectionMatrix();
-
     if (controls) {
       controls.target.copy(center);
       controls.update();
     }
-
     if (record && recordPoseRef) {
       recordPoseRef.current = {
         pos: nextPos.clone(),
@@ -172,7 +168,7 @@ function fitToExportRoot({ root, camera, controls, recordPoseRef, record = false
   requestAnimationFrame(tick);
 }
 
-/* ---------- 讓外部能呼叫 FIT / RESTORE，相機在 Canvas 內取得 ---------- */
+/* ---------- 讓外部能呼叫 FIT / RESTORE ---------- */
 function FitOnceHelper({ exportRootRef, controlsRef, initialPoseRef }) {
   const { camera, scene } = useThree();
   useEffect(() => {
@@ -214,6 +210,7 @@ export default function App() {
   const [src, setSrc] = useState(() => localStorage.getItem("dsl") || SAMPLE);
   const [cmds, setCmds] = useState(() => parseDSL(localStorage.getItem("dsl") || SAMPLE));
   const [nl, setNL] = useState("");
+
   const [pins, setPins] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("pins") || "[]");
@@ -223,12 +220,17 @@ export default function App() {
   });
   const [shotAsk, setShotAsk] = useState(0);
 
-  // 幾何根 / 控制器 / 「生成當下的相機姿態」
+  // 繪圖 UI 狀態
+  const [drawEnabled, setDrawEnabled] = useState(false);
+  const [drawShape, setDrawShape] = useState("box"); // 'box' | 'cyl'
+  const [drawHeight, setDrawHeight] = useState(20);
+
+  // 幾何根 / 控制器 / 「生成當下相機姿態」
   const exportRootRef = useRef();
   const controlsRef = useRef();
   const initialPoseRef = useRef(null);
 
-  // 分享連結參數（可載入 DSL + pins）
+  // 啟動參數分享
   useEffect(() => {
     const u = new URL(window.location.href);
     const s = u.searchParams.get("s");
@@ -253,18 +255,37 @@ export default function App() {
   useEffect(() => localStorage.setItem("dsl", src), [src]);
   useEffect(() => localStorage.setItem("pins", JSON.stringify(pins)), [pins]);
 
+  /* ---------- 工具：cmd 轉 DSL 行 ---------- */
+  const cmdToDSL = (c) => {
+    if (c.type === "box")
+      return `box w=${round(c.w)} h=${round(c.h)} d=${round(c.d)} at(${round(c.pos[0])},${round(
+        c.pos[1]
+      )},${round(c.pos[2])})`;
+    if (c.type === "cyl")
+      return `cylinder r=${round(c.r)} h=${round(c.h)} at(${round(c.pos[0])},${round(
+        c.pos[1]
+      )},${round(c.pos[2])}) axis=${c.axis || "y"}`;
+    if (c.type === "hole") {
+      const depth = c.depth === "thru" ? "" : ` depth=${round(c.depth)}`;
+      return `hole dia=${round(c.dia)} at(${round(c.pos[0])},${round(c.pos[1])},${round(
+        c.pos[2]
+      )})${depth}`;
+    }
+    return "";
+  };
+  const round = (n) => (typeof n === "number" ? Math.round(n * 100) / 100 : n);
+
   /* ---------- 生成 3D ---------- */
   const handleGenerate = (dslText) => {
     const text = dslText ?? src;
-    setSrc(text);            // 同步到下方 DSL 欄
-    setCmds(parseDSL(text)); // 更新指令
-    // 等一幀 → 嘗試 fit，並「記錄」這個生成當下的相機姿態
+    setSrc(text);
+    setCmds(parseDSL(text));
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: true } }));
     });
   };
 
-  /* ---------- 重設視角：回到生成當下 ---------- */
+  /* ---------- 重設視角 ---------- */
   const handleResetView = () => {
     const pose = initialPoseRef.current;
     if (!pose) {
@@ -281,7 +302,6 @@ export default function App() {
     const safe = prepareExportRoot(root);
     const exporter = new GLTFExporter();
     const opts = { binary: true, onlyVisible: true, truncateDrawRange: true, embedImages: true };
-
     parseGLTF(
       exporter,
       safe,
@@ -290,7 +310,6 @@ export default function App() {
         if (res instanceof ArrayBuffer) ab = res;
         else if (res && res.buffer instanceof ArrayBuffer) ab = res.buffer;
 
-        // 若不是有效 GLB，改輸出 glTF JSON 備援
         if (ab) {
           try {
             const u8 = new Uint8Array(ab, 0, 4);
@@ -316,7 +335,6 @@ export default function App() {
       opts
     );
   }
-
   function exportSTL() {
     const root = exportRootRef.current;
     if (!root) return alert("沒有可匯出的幾何，請先按「生成 3D」。");
@@ -339,8 +357,21 @@ export default function App() {
     }
   }
 
+  /* ---------- 繪圖提交：把幾何插入 cmds + 同步 DSL，並貼齊視角（不覆寫初始姿態） ---------- */
+  const handleDrawCreate = (cmd) => {
+    setCmds((prev) => [...prev, cmd]);
+    setSrc((prev) => {
+      const line = cmdToDSL(cmd);
+      return prev ? `${prev.trim().replace(/;+$/,"")};\n${line};` : `${line};`;
+    });
+    // 加完後置中，但不要覆蓋「生成當下」的重置姿態
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: false } }));
+    });
+  };
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", height: "100vh" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", height: "100vh" }}>
       {/* 左側面板 */}
       <div
         style={{
@@ -363,7 +394,7 @@ export default function App() {
             onClick={() => {
               const dsl = parseNL(nl);
               if (!dsl) return alert("抱歉，這段中文我看不懂，再換個說法試試 🙏");
-              handleGenerate(dsl); // 直接以這段 DSL 生成（並同步到下方 DSL 欄位）
+              handleGenerate(dsl);
             }}
           >
             中文 → 生成
@@ -379,11 +410,32 @@ export default function App() {
           >
             <option value="" disabled>載入範例…</option>
             {EXAMPLES.map((ex) => (
-              <option key={ex.label} value={ex.dsl}>
-                {ex.label}
-              </option>
+              <option key={ex.label} value={ex.dsl}>{ex.label}</option>
             ))}
           </select>
+        </div>
+
+        {/* 繪圖模式設定 */}
+        <h3 style={{ margin: "12px 0 8px" }}>✏️ 繪圖模式</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", alignItems: "center", gap: 8 }}>
+          <label>啟用</label>
+          <input type="checkbox" checked={drawEnabled} onChange={(e) => setDrawEnabled(e.target.checked)} />
+          <label>形狀</label>
+          <select
+            value={drawShape}
+            onChange={(e) => setDrawShape(e.target.value)}
+            style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }}
+          >
+            <option value="box">方塊（在地面上拖出寬/深）</option>
+            <option value="cyl">圓柱（拖出半徑）</option>
+          </select>
+          <label>高度 (mm)</label>
+          <input
+            type="number"
+            value={drawHeight}
+            onChange={(e) => setDrawHeight(Math.max(1, Number(e.target.value) || 1))}
+            style={{ background: "#0b0e13", color: "#ddd", padding: "6px 8px" }}
+          />
         </div>
 
         <h3 style={{ margin: "12px 0 8px" }}>DSL（輸入後按「生成 3D」）</h3>
@@ -404,23 +456,14 @@ export default function App() {
         <h4 style={{ margin: "12px 0 8px" }}>Pins（點模型可插針）</h4>
         {pins.length === 0 && <div style={{ opacity: 0.7 }}>點 3D 模型來新增 Pin</div>}
         {pins.map((p) => (
-          <div
-            key={p.id}
-            style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, marginBottom: 8 }}
-          >
+          <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, marginBottom: 8 }}>
             <input
               value={p.note}
               placeholder={`備註（${p.pos.map((n) => n.toFixed(1)).join(", ")})`}
               onChange={(e) =>
                 setPins((arr) => arr.map((x) => (x.id === p.id ? { ...x, note: e.target.value } : x)))
               }
-              style={{
-                background: "#0b0e13",
-                color: "#ddd",
-                border: "1px solid #333",
-                padding: "6px 8px",
-                borderRadius: 6,
-              }}
+              style={{ background: "#0b0e13", color: "#ddd", border: "1px solid #333", padding: "6px 8px", borderRadius: 6 }}
             />
             <button onClick={() => setPins((arr) => arr.filter((x) => x.id !== p.id))}>刪除</button>
           </div>
@@ -439,12 +482,24 @@ export default function App() {
         <directionalLight position={[50, 80, 50]} intensity={0.85} />
         <Grid args={[500, 50]} />
 
+        {/* 你的幾何 */}
         <SceneFromParams commands={cmds} exportRef={exportRootRef} />
+
+        {/* 繪圖工具（在 y=0 拖曳） */}
+        <DrawTool
+          enabled={drawEnabled}
+          shape={drawShape}
+          height={drawHeight}
+          onCreate={handleDrawCreate}
+        />
+
+        {/* 相機控制輔助 */}
         <FitOnceHelper
           exportRootRef={exportRootRef}
           controlsRef={controlsRef}
           initialPoseRef={initialPoseRef}
         />
+
         <PinLayer pins={pins} setPins={setPins} />
 
         <OrbitControls ref={controlsRef} makeDefault />
