@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-/** 壓縮折線（RDP） */
+/** RDP 簡化 */
 function simplifyRDP(points, eps = 2) {
   if (points.length <= 2) return points;
   const lineDist = (p, a, b) => {
@@ -8,10 +8,8 @@ function simplifyRDP(points, eps = 2) {
     const C = b.x - a.x, D = b.y - a.y;
     const dot = A * C + B * D;
     const len_sq = C * C + D * D || 1e-6;
-    let t = dot / len_sq;
-    t = Math.max(0, Math.min(1, t));
-    const xx = a.x + C * t;
-    const yy = a.y + D * t;
+    let t = Math.max(0, Math.min(1, dot / len_sq));
+    const xx = a.x + C * t, yy = a.y + D * t;
     return Math.hypot(p.x - xx, p.y - yy);
   };
   let dmax = 0, idx = 0;
@@ -27,123 +25,64 @@ function simplifyRDP(points, eps = 2) {
   return [points[0], points[points.length - 1]];
 }
 
-/** 將辨識到的圖形自動矯正為標準形狀 */
-function snapShape(kind, pts) {
-  if (kind === "line") {
-    const p1 = pts[0], p2 = pts[pts.length - 1];
-    const dx = p2.x - p1.x, dy = p2.y - p1.y;
-    if (Math.abs(dx) > Math.abs(dy)) {
-      return [{ x: p1.x, y: p1.y }, { x: p2.x, y: p1.y }];
-    } else {
-      return [{ x: p1.x, y: p1.y }, { x: p1.x, y: p2.y }];
-    }
-  }
-  if (kind === "circle") {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of pts) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    }
-    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-    const r = Math.max(maxX - minX, maxY - minY) / 2;
-    const out = [];
-    for (let i = 0; i < 32; i++) {
-      const a = (i / 32) * Math.PI * 2;
-      out.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
-    }
-    return out;
-  }
-  if (kind === "rect") {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of pts) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    }
-    return [
-      { x: minX, y: minY },
-      { x: maxX, y: minY },
-      { x: maxX, y: maxY },
-      { x: minX, y: maxY },
-      { x: minX, y: minY },
-    ];
-  }
-  return pts;
-}
-
-/** 圖形辨識 + 類型推斷 */
+/** 粗略辨識：line / circle / rect / poly */
 function recognizeStroke(pts) {
-  if (pts.length < 6) return null;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  let sumX = 0, sumY = 0;
+  if (pts.length < 6) return { kind: "free", pts };
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity,sumX=0,sumY=0;
   for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-    sumX += p.x; sumY += p.y;
+    if (p.x<minX) minX=p.x; if (p.y<minY) minY=p.y;
+    if (p.x>maxX) maxX=p.x; if (p.y>maxY) maxY=p.y;
+    sumX+=p.x; sumY+=p.y;
   }
-  const bbox = { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
-  const center = { x: sumX / pts.length, y: sumY / pts.length };
+  const bbox = { x:minX, y:minY, w:Math.max(1,maxX-minX), h:Math.max(1,maxY-minY) };
+  const center = { x:sumX/pts.length, y:sumY/pts.length };
+  const closed = Math.hypot(pts[0].x-pts.at(-1).x, pts[0].y-pts.at(-1).y) < 16;
 
-  const dx = pts[0].x - pts[pts.length - 1].x;
-  const dy = pts[0].y - pts[pts.length - 1].y;
-  const closed = Math.hypot(dx, dy) < 16;
+  // line（非閉合、長細比大）
+  const aspect = bbox.w>bbox.h ? bbox.w/bbox.h : bbox.h/bbox.w;
+  if (!closed && aspect > 6) return { kind:"line", bbox, center, pts:[pts[0], pts.at(-1)] };
 
-  const aspect = bbox.w > bbox.h ? bbox.w / bbox.h : bbox.h / bbox.w;
+  // 圓（閉合 + 半徑方差小）
+  let rSum=0; for (const p of pts) rSum += Math.hypot(p.x-center.x,p.y-center.y);
+  const rAvg=rSum/pts.length;
+  let varSum=0; for (const p of pts){ const r=Math.hypot(p.x-center.x,p.y-center.y); varSum += (r-rAvg)**2; }
+  const circularity = Math.sqrt(varSum/pts.length) / (rAvg||1);
+  if (closed && circularity < 0.18) return { kind:"circle", bbox, center };
 
-  let rSum = 0;
-  for (const p of pts) rSum += Math.hypot(p.x - center.x, p.y - center.y);
-  const rAvg = rSum / pts.length;
-  let varSum = 0;
-  for (const p of pts) {
-    const r = Math.hypot(p.x - center.x, p.y - center.y);
-    varSum += Math.pow(r - rAvg, 2);
-  }
-  const rStd = Math.sqrt(varSum / pts.length);
-  const circularity = rStd / (rAvg || 1);
-
-  // 直線
-  if (!closed && aspect > 4) return { kind: "line", bbox, center, pts: snapShape("line", pts) };
-
-  // 圓
-  if (closed && circularity < 0.18) return { kind: "circle", bbox, center, pts: snapShape("circle", pts) };
-
-  // 矩形
+  // 矩形（閉合 + RDP 約 4~8 點 + 不像圓）
   const simp = simplifyRDP(pts, 4);
-  if (closed && simp.length >= 4 && simp.length <= 8 && circularity > 0.18) {
-    return { kind: "rect", bbox, center, pts: snapShape("rect", pts) };
+  if (closed && simp.length>=4 && simp.length<=8 && circularity>=0.18) {
+    return { kind:"rect", bbox, center };
   }
 
-  // 其他閉合：多邊形
+  // 其他封閉圖形 → poly
   if (closed) {
-    return { kind: "poly", bbox, center, pts: simplifyRDP(pts, 3) };
+    // 去尾重複點並簡化
+    let arr = [...pts];
+    if (Math.hypot(arr[0].x-arr.at(-1).x, arr[0].y-arr.at(-1).y) < 16) arr = arr.slice(0,-1);
+    arr = simplifyRDP(arr, 3);
+    if (arr.length >= 3) return { kind:"poly", bbox, center, pts:arr };
   }
-
-  // 開放曲線
-  return { kind: "free", bbox, center, pts };
+  return { kind:"free", bbox, center, pts };
 }
 
 export default function Sketch2D({
   enabled,
   onExit,
-  onCommit,
+  onCommit,          // (dslString) => void
   mmPerPx = 1,
-  defaultBoxH = 10,
+  defaultBoxH = 20,  // 矩形/多邊形擠出高度 (mm)
   defaultCylH = 40,
   defaultHole = false,
 }) {
   const canvasRef = useRef(null);
   const [dragging, setDragging] = useState(false);
-  const [pts, setPts] = useState([]);
-  const [shapes, setShapes] = useState([]);
+  const [stroke, setStroke] = useState([]);
+  const [shapes, setShapes] = useState([]); // {kind, bbox, center, pts?}
   const [asHole, setAsHole] = useState(defaultHole);
   const [eraser, setEraser] = useState(false);
 
-  // 初始化實際像素大小
+  // canvas 尺寸/DPR
   useEffect(() => {
     if (!enabled) return;
     const cvs = canvasRef.current;
@@ -151,86 +90,102 @@ export default function Sketch2D({
     const rect = cvs.getBoundingClientRect();
     cvs.width = Math.round(rect.width * dpr);
     cvs.height = Math.round(rect.height * dpr);
-    cvs.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+    cvs.getContext("2d").setTransform(dpr,0,0,dpr,0,0);
   }, [enabled]);
 
-  // 畫背景+所有圖形
-  const draw = () => {
-    const cvs = canvasRef.current;
-    const ctx = cvs.getContext("2d");
-    const rect = cvs.getBoundingClientRect();
-    ctx.clearRect(0, 0, rect.width, rect.height);
-    ctx.fillStyle = "rgba(14,17,22,0.85)";
-    ctx.fillRect(0, 0, rect.width, rect.height);
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
+  // 繪製背景 + 形狀 + 目前筆畫
+  useEffect(() => {
+    if (!enabled) return;
+    const cvs = canvasRef.current, ctx = cvs.getContext("2d");
+    const r = cvs.getBoundingClientRect();
+
+    ctx.clearRect(0,0,r.width,r.height);
+    ctx.fillStyle = "rgba(14,17,22,0.9)";
+    ctx.fillRect(0,0,r.width,r.height);
+
+    // grid
+    ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 1;
     const step = 50;
-    for (let x = (rect.width / 2) % step; x < rect.width; x += step) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, rect.height); ctx.stroke();
+    for (let x = (r.width/2)%step; x < r.width; x += step) {
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,r.height); ctx.stroke();
     }
-    for (let y = (rect.height / 2) % step; y < rect.height; y += step) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(rect.width, y); ctx.stroke();
+    for (let y = (r.height/2)%step; y < r.height; y += step) {
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(r.width,y); ctx.stroke();
     }
+    // axes
     ctx.strokeStyle = "rgba(255,255,255,0.15)";
-    ctx.beginPath(); ctx.moveTo(rect.width / 2, 0); ctx.lineTo(rect.width / 2, rect.height); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, rect.height / 2); ctx.lineTo(rect.width, rect.height / 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(r.width/2,0); ctx.lineTo(r.width/2,r.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,r.height/2); ctx.lineTo(r.width,r.height/2); ctx.stroke();
 
     const drawPath = (arr, color) => {
-      if (arr.length < 2) return;
+      if (!arr || arr.length<2) return;
       ctx.strokeStyle = color; ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(arr[0].x, arr[0].y);
-      for (let i = 1; i < arr.length; i++) ctx.lineTo(arr[i].x, arr[i].y);
+      ctx.beginPath(); ctx.moveTo(arr[0].x, arr[0].y);
+      for (let i=1;i<arr.length;i++) ctx.lineTo(arr[i].x, arr[i].y);
       ctx.stroke();
     };
 
-    for (const s of shapes) drawPath(s.pts, "rgba(255,200,0,0.7)");
-    drawPath(pts, "rgba(173,216,230,0.95)");
-  };
-  useEffect(draw, [pts, shapes, enabled]);
+    // 已確定形狀
+    for (const s of shapes) {
+      if (s.kind === "circle") {
+        const cx = s.bbox.x + s.bbox.w/2, cy = s.bbox.y + s.bbox.h/2;
+        const r = Math.max(s.bbox.w, s.bbox.h)/2;
+        ctx.strokeStyle = "rgba(255,200,0,0.9)"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+      } else if (s.kind === "rect") {
+        ctx.strokeStyle = "rgba(255,200,0,0.9)"; ctx.lineWidth = 2;
+        ctx.strokeRect(s.bbox.x, s.bbox.y, s.bbox.w, s.bbox.h);
+      } else if (s.kind === "poly") {
+        drawPath([...s.pts, s.pts[0]], "rgba(255,200,0,0.9)");
+      } else if (s.kind === "line") {
+        drawPath(s.pts, "rgba(255,200,0,0.9)");
+      }
+    }
+    // 目前筆畫
+    drawPath(stroke, "rgba(173,216,230,0.95)");
+  }, [enabled, stroke, shapes]);
 
-  // 滑鼠事件
+  // 事件
   useEffect(() => {
     if (!enabled) return;
     const cvs = canvasRef.current;
 
     const getPos = (e) => {
       const r = cvs.getBoundingClientRect();
-      return {
-        x: (e.touches ? e.touches[0].clientX : e.clientX) - r.left,
-        y: (e.touches ? e.touches[0].clientY : e.clientY) - r.top,
-      };
+      return { x:(e.touches?e.touches[0].clientX:e.clientX)-r.left,
+               y:(e.touches?e.touches[0].clientY:e.clientY)-r.top };
     };
 
     const down = (e) => {
       e.preventDefault();
       const p = getPos(e);
       if (eraser) {
-        setShapes(s => s.filter(sh => !sh.pts.some(pt => Math.hypot(pt.x - p.x, pt.y - p.y) < 10)));
+        setShapes(arr => arr.filter(s => {
+          const testPts = s.kind==="circle"||s.kind==="rect" ? [
+            {x:s.bbox.x,y:s.bbox.y},
+            {x:s.bbox.x+s.bbox.w,y:s.bbox.y+s.bbox.h}
+          ] : s.pts;
+          return !testPts.some(pt => Math.hypot(pt.x-p.x, pt.y-p.y) < 10);
+        }));
         return;
       }
       setDragging(true);
-      setPts([p]);
+      setStroke([p]);
     };
     const move = (e) => {
       if (!dragging) return;
       e.preventDefault();
-      setPts((arr) => arr.concat(getPos(e)));
+      setStroke(list => list.concat(getPos(e)));
     };
     const up = (e) => {
       if (!dragging) return;
       e.preventDefault();
       setDragging(false);
-      setPts((arr) => {
-        let stroke = arr;
-        // 若起訖點很近，補一個末端點到起點，讓它「閉合」
-        const first = arr[0], last = arr[arr.length - 1];
-        if (Math.hypot(first.x - last.x, first.y - last.y) < 12) {
-          stroke = arr.slice();
-          stroke.push(first);
+      setStroke(list => {
+        const guess = recognizeStroke(list);
+        if (guess && (guess.kind!=="free")) {
+          setShapes(arr => arr.concat(guess));
         }
-        const guess = recognizeStroke(stroke);
-        if (guess) setShapes(s => [...s, guess]);
         return [];
       });
     };
@@ -249,87 +204,68 @@ export default function Sketch2D({
 
   if (!enabled) return null;
 
-  // 轉畫布 px → 世界座標 mm（X,Z），原點在畫布中心
+  // px → mm（原點在畫布中心；x=水平，z=垂直向下為正）
   const pxToMM = (p) => {
     const rect = canvasRef.current.getBoundingClientRect();
-    const cx = rect.width / 2, cy = rect.height / 2;
-    return { x: (p.x - cx) * mmPerPx, z: (p.y - cy) * mmPerPx };
+    const cx = rect.width/2, cy = rect.height/2;
+    return { x:(p.x-cx)*mmPerPx, z:(p.y-cy)*mmPerPx };
   };
 
-  // 將 shapes → 多行 DSL
-  const acceptShape = () => {
-    const dslList = shapes.map((s) => {
-      const { kind, bbox, center, pts } = s;
-      const c = pxToMM(center);
-
-      if (kind === "rect") {
-        const w = Math.round(bbox.w * mmPerPx);
-        const d = Math.round(bbox.h * mmPerPx);
-        const h = Math.max(1, Math.round(defaultBoxH));
-        return `box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h / 2)},${Math.round(c.z)});`;
+  // 送出：把 shapes 轉 DSL（box / cylinder / hole / poly）
+  const handleSubmit = () => {
+    const lines = [];
+    for (const s of shapes) {
+      if (s.kind === "rect") {
+        const w = Math.round(s.bbox.w * mmPerPx);
+        const d = Math.round(s.bbox.h * mmPerPx);
+        const h = Math.round(defaultBoxH);
+        const c = pxToMM({x:s.bbox.x+s.bbox.w/2, y:s.bbox.y+s.bbox.h/2});
+        lines.push(`box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h/2)},${Math.round(c.z)})`);
+      } else if (s.kind === "circle") {
+        const rpx = Math.max(s.bbox.w, s.bbox.h)/2;
+        const r = Math.max(1, Math.round(rpx * mmPerPx));
+        const c = pxToMM({x:s.bbox.x+s.bbox.w/2, y:s.bbox.y+s.bbox.h/2});
+        if (asHole) {
+          lines.push(`hole dia=${r*2} at(${Math.round(c.x)},0,${Math.round(c.z)}) depth=thru`);
+        } else {
+          const h = Math.round(defaultCylH);
+          lines.push(`cylinder r=${r} h=${h} at(${Math.round(c.x)},${Math.round(h/2)},${Math.round(c.z)}) axis=y`);
+        }
+      } else if (s.kind === "poly") {
+        // poly h=.. pts=(x1,z1),(x2,z2)...
+        const ptsMM = s.pts.map(p => pxToMM(p))
+          .map(v => `(${Math.round(v.x)},${Math.round(v.z)})`).join(",");
+        const centroid = pxToMM({x:s.center.x, y:s.center.y});
+        const h = Math.round(defaultBoxH);
+        lines.push(`poly h=${h} at(${Math.round(centroid.x)},${Math.round(h/2)},${Math.round(centroid.z)}) pts=${ptsMM}`);
+      } else if (s.kind === "line") {
+        // 可選：用細長 box 表示
+        const p1 = pxToMM(s.pts[0]), p2 = pxToMM(s.pts[1]);
+        const mid = { x:Math.round((p1.x+p2.x)/2), z:Math.round((p1.z+p2.z)/2) };
+        lines.push(`box w=${Math.max(1,Math.round(Math.hypot(p2.x-p1.x,p2.z-p1.z)))} h=1 d=1 at(${mid.x},1,${mid.z})`);
       }
-
-      if (kind === "circle") {
-        const r = Math.max(bbox.w, bbox.h) * mmPerPx / 2;
-        if (asHole) return `hole dia=${Math.round(r * 2)} at(${Math.round(c.x)},0,${Math.round(c.z)}) depth=thru;`;
-        const h = Math.max(1, Math.round(defaultCylH));
-        return `cylinder r=${Math.round(r)} h=${h} at(${Math.round(c.x)},${Math.round(h / 2)},${Math.round(c.z)}) axis=y;`;
-      }
-
-      if (kind === "poly" && pts?.length >= 3) {
-        const mmPts = pts.map(p => {
-          const q = pxToMM(p);
-          return `${Math.round(q.x)},${Math.round(q.z)}`;
-        }).join(";");
-        const h = Math.max(1, Math.round(defaultBoxH));
-        return `poly pts=${mmPts} h=${h} at(${Math.round(c.x)},${Math.round(h / 2)},${Math.round(c.z)});`;
-      }
-
-      if (kind === "line") {
-        // 開放直線：先給一個很薄的板子（1mm）作為臨時 3D，避免送出沒東西
-        const w = Math.max(1, Math.round(Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) * mmPerPx));
-        const h = 1, d = 2; // 超薄
-        return `box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h / 2)},${Math.round(c.z)});`;
-      }
-
-      if (kind === "free") {
-        // 任意開放曲線：同樣放薄板（之後可擴充 sweep）
-        const w = Math.max(1, Math.round(bbox.w * mmPerPx));
-        const d = Math.max(1, Math.round(bbox.h * mmPerPx));
-        const h = 1;
-        return `box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h / 2)},${Math.round(c.z)});`;
-      }
-
-      return "";
-    }).filter(Boolean);
-
-    if (dslList.length) {
-      onCommit?.(dslList.join("\n"));
-      // 要求右側貼齊視角
-      requestAnimationFrame(() => {
-        window.dispatchEvent(new CustomEvent("FIT_ONCE", { detail: { record: false } }));
-      });
     }
-    setShapes([]);
-    setPts([]);
+    if (lines.length) onCommit?.(lines.join(";\n") + ";");
+    setShapes([]); // 清空 2D
   };
 
   return (
-    <div style={{ position: "absolute", inset: 0, zIndex: 5 }}>
-      <canvas ref={canvasRef} style={{ width: "100%", height: "100%", cursor: eraser ? "cell" : "crosshair", touchAction: "none" }} />
+    <div style={{ position:"absolute", inset:0, zIndex:5 }}>
+      <canvas ref={canvasRef} style={{ width:"100%", height:"100%", cursor: eraser?"not-allowed":"crosshair", touchAction:"none" }}/>
       <div style={{
-        position: "absolute", top: 12, left: 12, display: "flex", gap: 8,
-        background: "rgba(0,0,0,0.65)", padding: "8px 10px", borderRadius: 8, color: "#ddd", backdropFilter: "blur(4px)"
+        position:"absolute", top:12, left:12, display:"flex", gap:8, alignItems:"center",
+        background:"rgba(0,0,0,0.65)", border:"1px solid #333", padding:"8px 10px",
+        borderRadius:8, color:"#ddd", backdropFilter:"blur(4px)"
       }}>
         <strong>✏️ 2D 草圖 → 3D</strong>
-        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <input type="checkbox" checked={asHole} onChange={(e) => setAsHole(e.target.checked)} />畫圓當作孔
+        <label style={{display:"flex",gap:6,alignItems:"center"}}>
+          <input type="checkbox" checked={asHole} onChange={e=>setAsHole(e.target.checked)}/>畫圓當作孔
         </label>
-        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <input type="checkbox" checked={eraser} onChange={(e) => setEraser(e.target.checked)} />橡皮擦
+        <label style={{display:"flex",gap:6,alignItems:"center"}}>
+          <input type="checkbox" checked={eraser} onChange={e=>setEraser(e.target.checked)}/>橡皮擦
         </label>
-        <button onClick={() => { setShapes([]); setPts([]); }}>清除</button>
-        <button onClick={acceptShape} disabled={!shapes.length}>✓ 送出</button>
+        <button onClick={()=>{setShapes([]); setStroke([]);}}>清除</button>
+        <button onClick={handleSubmit} disabled={!shapes.length}>✓ 送出</button>
         <button onClick={onExit}>關閉</button>
       </div>
     </div>
