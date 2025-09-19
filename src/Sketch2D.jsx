@@ -76,18 +76,10 @@ function snapShape(kind, pts) {
 
 /** 圖形辨識 + 類型推斷 */
 function recognizeStroke(pts) {
-  if (pts.length < 6) return null;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  let sumX = 0, sumY = 0;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-    sumX += p.x; sumY += p.y;
-  }
-  const bbox = { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
-  const center = { x: sumX / pts.length, y: sumY / pts.length };
+  if (pts.length < 6) return { kind:"free", pts, bbox:boxOf(pts), center:centerOf(pts) };
+
+  const bbox = boxOf(pts);
+  const center = centerOf(pts);
 
   const dx = pts[0].x - pts[pts.length - 1].x;
   const dy = pts[0].y - pts[pts.length - 1].y;
@@ -95,6 +87,7 @@ function recognizeStroke(pts) {
 
   const aspect = bbox.w > bbox.h ? bbox.w / bbox.h : bbox.h / bbox.w;
 
+  // 圓度
   let rSum = 0;
   for (const p of pts) rSum += Math.hypot(p.x - center.x, p.y - center.y);
   const rAvg = rSum / pts.length;
@@ -106,13 +99,36 @@ function recognizeStroke(pts) {
   const rStd = Math.sqrt(varSum / pts.length);
   const circularity = rStd / (rAvg || 1);
 
+  // 直線：非閉合且長細比大
   if (!closed && aspect > 4) return { kind: "line", bbox, center, pts: snapShape("line", pts) };
+
+  // 圓：閉合 + 圓度夠高
   if (closed && circularity < 0.18) return { kind: "circle", bbox, center, pts: snapShape("circle", pts) };
+
+  // 矩形：閉合、RDP 點數介於 4~8、不像圓
   const simp = simplifyRDP(pts, 4);
   if (closed && simp.length >= 4 && simp.length <= 8 && circularity > 0.18) {
     return { kind: "rect", bbox, center, pts: snapShape("rect", pts) };
   }
+
+  // 其他當 free
   return { kind:"free", bbox, center, pts };
+}
+
+function boxOf(pts){
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { x:minX, y:minY, w:Math.max(1,maxX-minX), h:Math.max(1,maxY-minY) };
+}
+function centerOf(pts){
+  let sumX = 0, sumY = 0;
+  for (const p of pts){ sumX+=p.x; sumY+=p.y; }
+  return { x: sumX/pts.length, y: sumY/pts.length };
 }
 
 export default function Sketch2D({
@@ -172,8 +188,9 @@ export default function Sketch2D({
       ctx.stroke();
     };
 
-    for (const s of shapes) drawPath(s.pts,"rgba(255,200,0,0.6)");
-    drawPath(pts,"rgba(173,216,230,0.9)");
+    // 已完成（黃）、正在畫（藍）
+    for (const s of shapes) drawPath(s.pts,"rgba(255,200,0,0.75)");
+    drawPath(pts,"rgba(173,216,230,0.95)");
   };
   useEffect(draw, [pts, shapes, enabled]);
 
@@ -194,6 +211,7 @@ export default function Sketch2D({
       e.preventDefault();
       const p = getPos(e);
       if (eraser) {
+        // 命中 10px 就刪
         setShapes(s => s.filter(sh => {
           return !sh.pts.some(pt => Math.hypot(pt.x - p.x, pt.y - p.y) < 10);
         }));
@@ -212,8 +230,13 @@ export default function Sketch2D({
       e.preventDefault();
       setDragging(false);
       setPts((arr) => {
-        const guess = recognizeStroke(arr);
-        if (guess) setShapes(s => [...s, guess]);
+        if (!arr || arr.length < 2) return [];
+        // 如果頭尾很近，當閉合
+        const first = arr[0], last = arr[arr.length - 1];
+        const closed = Math.hypot(first.x - last.x, first.y - last.y) < 16;
+        const stroke = closed ? arr.concat([first]) : arr;
+        const guess = recognizeStroke(stroke);
+        setShapes(s => [...s, guess]);
         return [];
       });
     };
@@ -232,40 +255,81 @@ export default function Sketch2D({
 
   if (!enabled) return null;
 
+  // px → mm（x,z）原點在畫布中心
   const pxToMM = (p) => {
     const rect = canvasRef.current.getBoundingClientRect();
     const cx = rect.width / 2, cy = rect.height / 2;
     return { x: (p.x - cx) * mmPerPx, z: (p.y - cy) * mmPerPx };
   };
 
+  // 把 shapes 轉 DSL
   const acceptShape = () => {
     const dslList = shapes.map((s) => {
-      const { kind, bbox, center } = s;
+      const { kind, bbox, center, pts } = s;
       const c = pxToMM(center);
+
       if (kind === "rect") {
-        const w = Math.round(bbox.w * mmPerPx);
-        const d = Math.round(bbox.h * mmPerPx);
-        const h = Math.round(defaultBoxH);
+        const w = Math.max(1, Math.round(bbox.w * mmPerPx));
+        const d = Math.max(1, Math.round(bbox.h * mmPerPx));
+        const h = Math.max(1, Math.round(defaultBoxH));
         return `box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h/2)},${Math.round(c.z)});`;
       }
+
       if (kind === "circle") {
         const r = Math.max(bbox.w, bbox.h) * mmPerPx / 2;
-        if (asHole) return `hole dia=${Math.round(r*2)} at(${Math.round(c.x)},0,${Math.round(c.z)}) depth=thru;`;
-        else return `cylinder r=${Math.round(r)} h=${defaultCylH} at(${Math.round(c.x)},${Math.round(defaultCylH/2)},${Math.round(c.z)}) axis=y;`;
+        if (asHole) {
+          return `hole dia=${Math.max(1,Math.round(r*2))} at(${Math.round(c.x)},0,${Math.round(c.z)}) depth=thru;`;
+        } else {
+          const h = Math.max(1, Math.round(defaultCylH));
+          return `cylinder r=${Math.max(1,Math.round(r))} h=${h} at(${Math.round(c.x)},${Math.round(h/2)},${Math.round(c.z)}) axis=y;`;
+        }
       }
+
+      if (kind === "line" && pts?.length >= 2) {
+        // 用外接盒做一片薄板 (可改成圓柱棒)
+        const a = pxToMM(pts[0]);
+        const b = pxToMM(pts[pts.length-1]);
+        const w = Math.max(1, Math.round(Math.abs(b.x - a.x)));
+        const d = Math.max(1, Math.round(Math.abs(b.z - a.z)));
+        const h = Math.max(1, Math.round(defaultBoxH));
+        const cx = Math.round((a.x + b.x) / 2);
+        const cz = Math.round((a.z + b.z) / 2);
+        return `box w=${w||1} h=${h} d=${d||1} at(${cx},${Math.round(h/2)},${cz});`;
+      }
+
+      if (kind === "free") {
+        // 以自由曲線外接盒做薄板（先確保一定看得到模型）
+        const w = Math.max(5, Math.round(bbox.w * mmPerPx));
+        const d = Math.max(5, Math.round(bbox.h * mmPerPx));
+        const h = Math.max(2, Math.round(defaultBoxH));
+        return `box w=${w} h=${h} d=${d} at(${Math.round(c.x)},${Math.round(h/2)},${Math.round(c.z)});`;
+      }
+
       return "";
     }).filter(Boolean);
-    if (dslList.length) onCommit?.(dslList.join("\n"));
+
+    // Debug：一定看得到你送出的 DSL
+    if (!dslList.length) {
+      console.warn("[Sketch2D] 沒有可轉換的圖形，請嘗試畫圓/矩形，或已啟用 line/free 的 fallback。");
+      alert("目前筆劃無法轉 3D，請畫圓或矩形（或改畫更規則一些）。");
+      return;
+    }
+
+    const payload = dslList.join("\n");
+    console.log("[Sketch2D] 送出 DSL：\n" + payload);
+    onCommit?.(payload);      // 交給 App → appendDSL → parseDSL → SceneFromParams
     setShapes([]);
     setPts([]);
+    // 交回後，App 會自動 FIT 視角；若沒看到，點「重製視角」。
   };
 
   return (
     <div style={{position:"absolute",inset:0,zIndex:5}}>
-      <canvas ref={canvasRef} style={{width:"100%",height:"100%",cursor:"crosshair",touchAction:"none"}}/>
+      <canvas ref={canvasRef} style={{width:"100%",height:"100%",cursor: eraser ? "not-allowed" : "crosshair",touchAction:"none"}}/>
       <div style={{
-        position:"absolute",top:12,left:12,display:"flex",gap:8,
-        background:"rgba(0,0,0,0.65)",padding:"8px 10px",borderRadius:8,color:"#ddd"
+        position:"absolute",top:12,left:12,display:"flex",gap:8,alignItems:"center",
+        background:"rgba(0,0,0,0.65)",padding:"8px 10px",borderRadius:8,color:"#ddd",
+        border:"1px solid #333",backdropFilter:"blur(4px)"
       }}>
         <strong>✏️ 2D 草圖 → 3D</strong>
         <label style={{display:"flex",gap:6,alignItems:"center"}}>
